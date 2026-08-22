@@ -17,6 +17,9 @@ func SendAll(socket io.Writer, bytes []byte) error {
 		if err != nil {
 			return err
 		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
 	}
 
 	return nil
@@ -39,6 +42,9 @@ func RecvAll(socket io.Reader, size int) ([]byte, error) {
 		}
 		if err != nil {
 			return nil, err
+		}
+		if n == 0 {
+			return nil, io.ErrNoProgress
 		}
 	}
 
