@@ -6,10 +6,7 @@ def recv_all(socket: socket.socket, size: int) -> bytes:
     bytes_received = 0
 
     while bytes_received < size:
-        chunk = socket.recv(size)
-        if not chunk:
-            raise ConnectionError("socket closed while receiving data")
-
+        chunk = socket.recv(size - bytes_received)
         received_chunks.append(chunk)
         bytes_received += len(chunk)
 
@@ -21,7 +18,4 @@ def send_all(socket: socket.socket, data: bytes) -> None:
 
     while bytes_sent < len(data):
         sent = socket.send(data[bytes_sent:])
-        if sent == 0:
-            raise ConnectionError("socket closed while sending data")
-
         bytes_sent += sent

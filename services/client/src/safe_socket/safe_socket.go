@@ -5,8 +5,6 @@ import (
 	"io"
 )
 
-//TODO: Complete with a short-read/short-write tolerant implementation
-
 func SendAll(socket io.Writer, bytes []byte) error {
 	bytesSent := 0
 
@@ -16,9 +14,6 @@ func SendAll(socket io.Writer, bytes []byte) error {
 
 		if err != nil {
 			return err
-		}
-		if n == 0 {
-			return io.ErrNoProgress
 		}
 	}
 
@@ -42,9 +37,6 @@ func RecvAll(socket io.Reader, size int) ([]byte, error) {
 		}
 		if err != nil {
 			return nil, err
-		}
-		if n == 0 {
-			return nil, io.ErrNoProgress
 		}
 	}
 
