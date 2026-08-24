@@ -17,10 +17,12 @@ const (
 type MessageType byte
 
 const (
-	MessageTypeBet    MessageType = 1
-	MessageTypeEnd    MessageType = 2
-	MessageTypeWinner MessageType = 3
-	MessageTypeError  MessageType = 4
+	MessageTypeBet       MessageType = 1
+	MessageTypeEnd       MessageType = 2
+	MessageTypeWinner    MessageType = 3
+	MessageTypeError     MessageType = 4
+	MessageTypeBetsBatch MessageType = 5
+	MessageTypeBatchAck  MessageType = 6
 )
 
 type Message struct {
@@ -129,5 +131,5 @@ func RecvMessage(socket io.Reader) (Message, error) {
 }
 
 func (messageType MessageType) isValid() bool {
-	return messageType >= MessageTypeBet && messageType <= MessageTypeError
+	return messageType >= MessageTypeBet && messageType <= MessageTypeBatchAck
 }

@@ -7,10 +7,11 @@ import (
 )
 
 const (
-	uint16Size    = 2
-	uint32Size    = 4
-	uint64Size    = 8
-	maxTextLength = 65535
+	uint16Size          = 2
+	uint32Size          = 4
+	uint64Size          = 8
+	maxTextLength       = 65535
+	maxBatchPayloadSize = 16 * 1024 * 1024
 )
 
 type BetPayload struct {
@@ -96,6 +97,81 @@ func DecodeBet(payload []byte) (BetPayload, error) {
 		Birthdate: birthdate,
 		Number:    number,
 	}, nil
+}
+
+func EncodeBetBatch(bets []BetPayload) ([]byte, error) {
+	if len(bets) == 0 {
+		return nil, fmt.Errorf("bet batch cannot be empty")
+	}
+	if uint64(len(bets)) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("bet batch contains too many bets: %d", len(bets))
+	}
+
+	encodedBets := make([][]byte, len(bets))
+	payloadSize := uint32Size
+	for index, bet := range bets {
+		encodedBet, err := EncodeBet(bet)
+		if err != nil {
+			return nil, fmt.Errorf("encode bet %d: %w", index, err)
+		}
+		if len(encodedBet) > maxBatchPayloadSize-payloadSize-uint32Size {
+			return nil, fmt.Errorf("bet batch payload exceeds %d bytes", maxBatchPayloadSize)
+		}
+		encodedBets[index] = encodedBet
+		payloadSize += uint32Size + len(encodedBet)
+	}
+
+	payload := make([]byte, payloadSize)
+	binary.BigEndian.PutUint32(payload, uint32(len(encodedBets)))
+	offset := uint32Size
+	for _, encodedBet := range encodedBets {
+		binary.BigEndian.PutUint32(payload[offset:], uint32(len(encodedBet)))
+		offset += uint32Size
+		copy(payload[offset:], encodedBet)
+		offset += len(encodedBet)
+	}
+
+	return payload, nil
+}
+
+func DecodeBetBatch(payload []byte) ([]BetPayload, error) {
+	if len(payload) > maxBatchPayloadSize {
+		return nil, fmt.Errorf("bet batch payload exceeds %d bytes", maxBatchPayloadSize)
+	}
+	if len(payload) < uint32Size {
+		return nil, fmt.Errorf("bet batch payload is missing bet count")
+	}
+
+	betCount := binary.BigEndian.Uint32(payload)
+	if betCount == 0 {
+		return nil, fmt.Errorf("bet batch cannot be empty")
+	}
+
+	bets := make([]BetPayload, 0)
+	offset := uint32Size
+	for index := uint32(0); index < betCount; index++ {
+		if len(payload)-offset < uint32Size {
+			return nil, fmt.Errorf("bet batch payload is missing length for bet %d", index)
+		}
+		betLength := int(binary.BigEndian.Uint32(payload[offset:]))
+		offset += uint32Size
+		if betLength > len(payload)-offset {
+			return nil, fmt.Errorf("bet batch payload is missing data for bet %d", index)
+		}
+
+		bet, err := DecodeBet(payload[offset : offset+betLength])
+		if err != nil {
+			return nil, fmt.Errorf("decode bet %d: %w", index, err)
+		}
+		bets = append(bets, bet)
+		offset += betLength
+	}
+
+	if offset != len(payload) {
+		return nil, fmt.Errorf("bet batch payload has %d trailing bytes", len(payload)-offset)
+	}
+
+	return bets, nil
 }
 
 func encodeText(value string, field string) ([]byte, error) {

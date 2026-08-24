@@ -4,11 +4,14 @@ UINT16_SIZE = 2
 UINT32_SIZE = 4
 UINT64_SIZE = 8
 MAX_TEXT_LENGTH = 65535
+MAX_BATCH_PAYLOAD_SIZE = 16 * 1024 * 1024
 
 MESSAGE_TYPE_BET = 1
 MESSAGE_TYPE_END = 2
 MESSAGE_TYPE_WINNER = 3
 MESSAGE_TYPE_ERROR = 4
+MESSAGE_TYPE_BETS_BATCH = 5
+MESSAGE_TYPE_BATCH_ACK = 6
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,77 @@ def decode_bet(payload: bytes) -> BetPayload:
         birthdate=birthdate,
         number=number,
     )
+
+
+def encode_bet_batch(bets: list[BetPayload]) -> bytes:
+    if not bets:
+        raise ValueError("bet batch cannot be empty")
+
+    encoded_bets = []
+    payload_size = UINT32_SIZE
+    for index, bet in enumerate(bets):
+        try:
+            encoded_bet = encode_bet(bet)
+        except (TypeError, ValueError) as error:
+            raise type(error)(f"encode bet {index}: {error}") from error
+        payload_size += UINT32_SIZE + len(encoded_bet)
+        if payload_size > MAX_BATCH_PAYLOAD_SIZE:
+            raise ValueError(
+                f"bet batch payload exceeds {MAX_BATCH_PAYLOAD_SIZE} bytes"
+            )
+        encoded_bets.append(encoded_bet)
+
+    return b"".join(
+        [
+            _encode_uint(len(encoded_bets), UINT32_SIZE, "bet count"),
+            *(
+                _encode_uint(len(encoded_bet), UINT32_SIZE, "bet length")
+                + encoded_bet
+                for encoded_bet in encoded_bets
+            ),
+        ]
+    )
+
+
+def decode_bet_batch(payload: bytes) -> list[BetPayload]:
+    if len(payload) > MAX_BATCH_PAYLOAD_SIZE:
+        raise ValueError(
+            f"bet batch payload exceeds {MAX_BATCH_PAYLOAD_SIZE} bytes"
+        )
+    if len(payload) < UINT32_SIZE:
+        raise ValueError("bet batch payload is missing bet count")
+
+    bet_count = int.from_bytes(payload[:UINT32_SIZE], byteorder="big")
+    if bet_count == 0:
+        raise ValueError("bet batch cannot be empty")
+
+    bets = []
+    offset = UINT32_SIZE
+    for index in range(bet_count):
+        if len(payload) - offset < UINT32_SIZE:
+            raise ValueError(
+                f"bet batch payload is missing length for bet {index}"
+            )
+        bet_length = int.from_bytes(
+            payload[offset : offset + UINT32_SIZE], byteorder="big"
+        )
+        offset += UINT32_SIZE
+        end = offset + bet_length
+        if end > len(payload):
+            raise ValueError(f"bet batch payload is missing data for bet {index}")
+
+        try:
+            bets.append(decode_bet(payload[offset:end]))
+        except ValueError as error:
+            raise ValueError(f"decode bet {index}: {error}") from error
+        offset = end
+
+    if offset != len(payload):
+        raise ValueError(
+            f"bet batch payload has {len(payload) - offset} trailing bytes"
+        )
+
+    return bets
 
 
 def _encode_uint(value: int, size: int, field: str) -> bytes:
