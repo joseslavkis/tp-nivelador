@@ -1,26 +1,27 @@
 package client
 
 import (
-	"bufio"
-	"bytes"
+	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
+	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/protocol"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
 )
 
 const CONNECTION_ATTEMPTS_MAX = 3
 const CONNECTION_ATTEMPS_DELAY_MS = 200
 
-const ECHO_CLIENT_BUFFER_SIZE = 512
-
 type ClientConfig struct {
 	ServerHost string
 	ServerPort string
-	AgencyId   string
+	AgencyID   uint32
 	InputFile  string
 	OutputFile string
 }
@@ -78,40 +79,115 @@ func (client *Client) Run() error {
 	}
 	defer outputFile.Close()
 
-	scanner := bufio.NewScanner(inputFile)
-	for messageId := 0; scanner.Scan(); messageId++ {
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-		logger.Info(mainAction, logger.InProgress, messageArgs...)
-
-		clientMessage := scanner.Text()
-
-		if err := safe_socket.SendAll(client.conn, []byte(clientMessage)); err != nil {
-			logger.Error("send-message", logger.Fail, messageArgs...)
-			return err
-		}
-
-		responseBuffer, err := safe_socket.RecvAll(client.conn, ECHO_CLIENT_BUFFER_SIZE)
-		if err != nil {
-			logger.Error("recv-response", logger.Fail, messageArgs...)
-			return err
-		}
-
-		response := bytes.TrimRight(responseBuffer, "\x00")
-		if len(response) == 0 {
-			logger.Error("check-response", logger.Fail, messageArgs...)
-			return fmt.Errorf("empty response for message %d", messageId)
-		}
-
-		if _, err := outputFile.Write(append(response, '\n')); err != nil {
-			logger.Error("write-output", logger.Fail, messageArgs...)
-			return err
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
+	reader := csv.NewReader(inputFile)
+	reader.FieldsPerRecord = 5
+	if err := client.sendBets(reader); err != nil {
 		return err
 	}
-	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
+
+	writer := csv.NewWriter(outputFile)
+	if err := client.receiveWinners(writer); err != nil {
+		return err
+	}
+
+	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyID)
 
 	return nil
+}
+
+func (client *Client) sendBets(reader *csv.Reader) error {
+	for messageID := 0; ; messageID++ {
+		record, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read input record %d: %w", messageID, err)
+		}
+
+		bet, err := client.parseBet(record)
+		if err != nil {
+			return fmt.Errorf("parse input record %d: %w", messageID, err)
+		}
+		payload, err := protocol.EncodeBet(bet)
+		if err != nil {
+			return fmt.Errorf("encode input record %d: %w", messageID, err)
+		}
+
+		if err := safe_socket.SendMessage(client.conn, safe_socket.Message{
+			Type:    safe_socket.MessageTypeBet,
+			Payload: payload,
+		}); err != nil {
+			return fmt.Errorf("send input record %d: %w", messageID, err)
+		}
+	}
+
+	if err := safe_socket.SendMessage(client.conn, safe_socket.Message{
+		Type: safe_socket.MessageTypeEnd,
+	}); err != nil {
+		return fmt.Errorf("send end of bets: %w", err)
+	}
+	return nil
+}
+
+func (client *Client) parseBet(record []string) (protocol.BetPayload, error) {
+	document, err := strconv.ParseUint(record[2], 10, 64)
+	if err != nil {
+		return protocol.BetPayload{}, fmt.Errorf("invalid document %q: %w", record[2], err)
+	}
+	number, err := strconv.ParseUint(record[4], 10, 32)
+	if err != nil {
+		return protocol.BetPayload{}, fmt.Errorf("invalid number %q: %w", record[4], err)
+	}
+
+	return protocol.BetPayload{
+		AgencyID:  client.config.AgencyID,
+		FirstName: record[0],
+		LastName:  record[1],
+		Document:  document,
+		Birthdate: record[3],
+		Number:    uint32(number),
+	}, nil
+}
+
+func (client *Client) receiveWinners(writer *csv.Writer) error {
+	for {
+		message, err := safe_socket.RecvMessage(client.conn)
+		if err != nil {
+			return fmt.Errorf("receive server response: %w", err)
+		}
+
+		switch message.Type {
+		case safe_socket.MessageTypeWinner:
+			winner, err := protocol.DecodeBet(message.Payload)
+			if err != nil {
+				return fmt.Errorf("decode winner: %w", err)
+			}
+			if winner.AgencyID != client.config.AgencyID {
+				return fmt.Errorf("received winner for agency %d", winner.AgencyID)
+			}
+			if err := writer.Write([]string{
+				winner.FirstName,
+				winner.LastName,
+				strconv.FormatUint(winner.Document, 10),
+				winner.Birthdate,
+				strconv.FormatUint(uint64(winner.Number), 10),
+			}); err != nil {
+				return fmt.Errorf("write winner: %w", err)
+			}
+		case safe_socket.MessageTypeEnd:
+			if len(message.Payload) != 0 {
+				return fmt.Errorf("end message must have an empty payload")
+			}
+			writer.Flush()
+			if err := writer.Error(); err != nil {
+				return fmt.Errorf("flush winners: %w", err)
+			}
+			return nil
+		case safe_socket.MessageTypeError:
+			return fmt.Errorf("server rejected request: %s", message.Payload)
+		default:
+			return fmt.Errorf("unexpected server message type %d", message.Type)
+		}
+	}
 }

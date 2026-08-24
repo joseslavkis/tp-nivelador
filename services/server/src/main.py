@@ -4,17 +4,17 @@ import sys
 import logger
 import server
 
-SERVER_HOST = os.environ["SERVER_HOST"]
-SERVER_PORT = int(os.environ["SERVER_PORT"])
-
-
-def main():
+def main() -> int:
     logger.init()
-    s = server.Server(SERVER_HOST, SERVER_PORT)
     try:
-        s.run()
-    except Exception as e:
-        logger.error("server-run", logger.LogResult.fail, "err", e)
+        server_instance = server.Server(
+            server_host=os.environ["SERVER_HOST"],
+            server_port=int(os.environ["SERVER_PORT"]),
+            storage_directory=os.environ.get("STORAGE_DIRECTORY", "/tmp/lottery"),
+        )
+        server_instance.run()
+    except Exception as error:
+        logger.error("server-run", logger.LogResult.fail, "err", error)
         return 1
     return 0
 

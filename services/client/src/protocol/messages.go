@@ -51,7 +51,7 @@ func EncodeBet(bet BetPayload) ([]byte, error) {
 	offset += uint64Size
 
 	offset = writeText(payload, offset, birthdate)
-	
+
 	binary.BigEndian.PutUint32(payload[offset:], bet.Number)
 
 	return payload, nil

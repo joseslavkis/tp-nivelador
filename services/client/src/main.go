@@ -2,16 +2,22 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"strconv"
 
 	client "github.com/7574-sistemas-distribuidos/tp-nivelador/src/client"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 )
 
 func loadConfig() (client.ClientConfig, error) {
-	agencyId := os.Getenv("AGENCY_ID")
-	if agencyId == "" {
+	agencyIDValue := os.Getenv("AGENCY_ID")
+	if agencyIDValue == "" {
 		return client.ClientConfig{}, errors.New("AGENCY_ID environment variable is required")
+	}
+	agencyID, err := strconv.ParseUint(agencyIDValue, 10, 32)
+	if err != nil {
+		return client.ClientConfig{}, fmt.Errorf("AGENCY_ID must be a uint32: %w", err)
 	}
 
 	serverHost := os.Getenv("SERVER_HOST")
@@ -37,7 +43,7 @@ func loadConfig() (client.ClientConfig, error) {
 	return client.ClientConfig{
 		ServerHost: serverHost,
 		ServerPort: serverPort,
-		AgencyId:   agencyId,
+		AgencyID:   uint32(agencyID),
 		InputFile:  inputFile,
 		OutputFile: outputFile,
 	}, nil
