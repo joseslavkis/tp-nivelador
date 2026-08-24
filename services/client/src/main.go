@@ -10,6 +10,8 @@ import (
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 )
 
+const defaultBatchSize = 1
+
 func loadConfig() (client.ClientConfig, error) {
 	agencyIDValue := os.Getenv("AGENCY_ID")
 	if agencyIDValue == "" {
@@ -40,12 +42,25 @@ func loadConfig() (client.ClientConfig, error) {
 		return client.ClientConfig{}, errors.New("OUTPUT_FILE environment variable is required")
 	}
 
+	batchSize := defaultBatchSize
+	if batchSizeValue := os.Getenv("BATCH_SIZE"); batchSizeValue != "" {
+		parsedBatchSize, err := strconv.ParseUint(batchSizeValue, 10, 31)
+		if err != nil {
+			return client.ClientConfig{}, fmt.Errorf("BATCH_SIZE must be a positive integer: %w", err)
+		}
+		if parsedBatchSize == 0 {
+			return client.ClientConfig{}, errors.New("BATCH_SIZE must be a positive integer")
+		}
+		batchSize = int(parsedBatchSize)
+	}
+
 	return client.ClientConfig{
 		ServerHost: serverHost,
 		ServerPort: serverPort,
 		AgencyID:   uint32(agencyID),
 		InputFile:  inputFile,
 		OutputFile: outputFile,
+		BatchSize:  batchSize,
 	}, nil
 }
 

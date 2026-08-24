@@ -24,6 +24,7 @@ type ClientConfig struct {
 	AgencyID   uint32
 	InputFile  string
 	OutputFile string
+	BatchSize  int
 }
 
 type Client struct {
@@ -96,29 +97,38 @@ func (client *Client) Run() error {
 }
 
 func (client *Client) sendBets(reader *csv.Reader) error {
-	for messageID := 0; ; messageID++ {
+	bets := make([]protocol.BetPayload, 0)
+	batchID := 0
+	recordID := 0
+	for {
 		record, err := reader.Read()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("read input record %d: %w", messageID, err)
+			return fmt.Errorf("read input record %d: %w", recordID, err)
 		}
 
 		bet, err := client.parseBet(record)
 		if err != nil {
-			return fmt.Errorf("parse input record %d: %w", messageID, err)
+			return fmt.Errorf("parse input record %d: %w", recordID, err)
 		}
-		payload, err := protocol.EncodeBet(bet)
-		if err != nil {
-			return fmt.Errorf("encode input record %d: %w", messageID, err)
+		bets = append(bets, bet)
+		recordID++
+		if len(bets) < client.config.BatchSize {
+			continue
 		}
 
-		if err := safe_socket.SendMessage(client.conn, safe_socket.Message{
-			Type:    safe_socket.MessageTypeBet,
-			Payload: payload,
-		}); err != nil {
-			return fmt.Errorf("send input record %d: %w", messageID, err)
+		if err := client.sendBetBatch(bets, batchID); err != nil {
+			return err
+		}
+		bets = bets[:0]
+		batchID++
+	}
+
+	if len(bets) > 0 {
+		if err := client.sendBetBatch(bets, batchID); err != nil {
+			return err
 		}
 	}
 
@@ -128,6 +138,39 @@ func (client *Client) sendBets(reader *csv.Reader) error {
 		return fmt.Errorf("send end of bets: %w", err)
 	}
 	return nil
+}
+
+func (client *Client) sendBetBatch(bets []protocol.BetPayload, batchID int) error {
+	payload, err := protocol.EncodeBetBatch(bets)
+	if err != nil {
+		return fmt.Errorf("encode bet batch %d: %w", batchID, err)
+	}
+	if err := safe_socket.SendMessage(client.conn, safe_socket.Message{
+		Type:    safe_socket.MessageTypeBetsBatch,
+		Payload: payload,
+	}); err != nil {
+		return fmt.Errorf("send bet batch %d: %w", batchID, err)
+	}
+
+	response, err := safe_socket.RecvMessage(client.conn)
+	if err != nil {
+		return fmt.Errorf("receive acknowledgment for bet batch %d: %w", batchID, err)
+	}
+	switch response.Type {
+	case safe_socket.MessageTypeBatchAck:
+		if len(response.Payload) != 0 {
+			return fmt.Errorf("acknowledgment for bet batch %d must have an empty payload", batchID)
+		}
+		return nil
+	case safe_socket.MessageTypeError:
+		return fmt.Errorf("server rejected bet batch %d: %s", batchID, response.Payload)
+	default:
+		return fmt.Errorf(
+			"unexpected response type %d for bet batch %d",
+			response.Type,
+			batchID,
+		)
+	}
 }
 
 func (client *Client) parseBet(record []string) (protocol.BetPayload, error) {
