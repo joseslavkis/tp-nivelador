@@ -7,11 +7,12 @@ import (
 )
 
 const (
-	uint16Size          = 2
-	uint32Size          = 4
-	uint64Size          = 8
-	maxTextLength       = 65535
-	maxBatchPayloadSize = 16 * 1024 * 1024
+	uint16Size              = 2
+	uint32Size              = 4
+	uint64Size              = 8
+	maxTextLength           = 65535
+	maxBatchPayloadSize     = 16 * 1024 * 1024
+	betBatchInitialCapacity = 1024
 )
 
 type BetPayload struct {
@@ -29,9 +30,8 @@ type BetBatchEncoder struct {
 }
 
 func (encoder *BetBatchEncoder) Reset(payload []byte) {
-	const initialCapacity = 1024
 	if cap(payload) < uint32Size {
-		payload = make([]byte, uint32Size, initialCapacity)
+		payload = make([]byte, uint32Size, betBatchInitialCapacity)
 	} else {
 		payload = payload[:uint32Size]
 	}

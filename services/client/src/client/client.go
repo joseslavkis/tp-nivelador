@@ -18,6 +18,9 @@ import (
 const CONNECTION_ATTEMPTS_MAX = 3
 const CONNECTION_ATTEMPS_DELAY_MS = 200
 
+const connectToServerAction = "connect-to-server"
+const processInputFileAction = "process-input-file"
+
 type ClientConfig struct {
 	ServerHost string
 	ServerPort string
@@ -50,20 +53,19 @@ func NewClient(config ClientConfig) (*Client, error) {
 }
 
 func connectToServer(host, port string) (net.Conn, error) {
-	const action = "connect-to-server"
 	var err error
 	var conn net.Conn
 
-	logger.Info(action, logger.InProgress)
+	logger.Info(connectToServerAction, logger.InProgress)
 	for i := range CONNECTION_ATTEMPTS_MAX {
 		conn, err = net.Dial("tcp", host+":"+port)
 		if err != nil {
-			logger.Warn(action, logger.Fail, "attempt", i)
+			logger.Warn(connectToServerAction, logger.Fail, "attempt", i)
 			time.Sleep(CONNECTION_ATTEMPS_DELAY_MS * time.Millisecond)
 			continue
 		}
 
-		logger.Info(action, logger.Success)
+		logger.Info(connectToServerAction, logger.Success)
 		break
 	}
 
@@ -71,7 +73,6 @@ func connectToServer(host, port string) (net.Conn, error) {
 }
 
 func (client *Client) Run() error {
-	const mainAction = "process-input-file"
 	defer client.conn.Close()
 
 	inputFile, err := os.Open(client.config.InputFile)
@@ -96,7 +97,7 @@ func (client *Client) Run() error {
 		return err
 	}
 
-	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyID)
+	logger.Info(processInputFileAction, logger.Success, "agency-id", client.config.AgencyID)
 
 	return nil
 }
