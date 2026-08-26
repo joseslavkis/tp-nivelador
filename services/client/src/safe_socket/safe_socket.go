@@ -14,6 +14,8 @@ const (
 	maxEmptyOperations = 100
 )
 
+const MessageHeaderSize = messageHeaderSize
+
 type MessageType byte
 
 const (
@@ -60,45 +62,59 @@ func RecvAll(socket io.Reader, size int) ([]byte, error) {
 	}
 
 	buffer := make([]byte, size)
+	if err := recvAllInto(socket, buffer); err != nil {
+		return nil, err
+	}
+	return buffer, nil
+}
+
+func recvAllInto(socket io.Reader, buffer []byte) error {
 	bytesRead := 0
 	emptyReads := 0
 
-	for bytesRead < size {
+	for bytesRead < len(buffer) {
 		n, err := socket.Read(buffer[bytesRead:])
 		bytesRead += n
 
-		if bytesRead == size {
-			return buffer, nil
+		if bytesRead == len(buffer) {
+			return nil
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if n == 0 {
 			emptyReads++
 			if emptyReads >= maxEmptyOperations {
-				return nil, io.ErrNoProgress
+				return io.ErrNoProgress
 			}
 			continue
 		}
 		emptyReads = 0
 	}
 
-	return buffer, nil
+	return nil
 }
 
 func SendMessage(socket io.Writer, message Message) error {
+	header := make([]byte, messageHeaderSize)
+	return SendMessageWithHeader(socket, message, header)
+}
+
+func SendMessageWithHeader(socket io.Writer, message Message, header []byte) error {
 	if !message.Type.isValid() {
 		return fmt.Errorf("invalid message type %d", message.Type)
 	}
 	if len(message.Payload) > maxPayloadSize {
 		return fmt.Errorf("payload exceeds %d bytes", maxPayloadSize)
 	}
+	if len(header) < messageHeaderSize {
+		return fmt.Errorf("message header buffer must contain at least %d bytes", messageHeaderSize)
+	}
 
-	header := make([]byte, messageHeaderSize)
 	header[0] = byte(message.Type)
 	binary.BigEndian.PutUint32(header[1:], uint32(len(message.Payload)))
 
-	if err := SendAll(socket, header); err != nil {
+	if err := SendAll(socket, header[:messageHeaderSize]); err != nil {
 		return err
 	}
 
@@ -106,8 +122,14 @@ func SendMessage(socket io.Writer, message Message) error {
 }
 
 func RecvMessage(socket io.Reader) (Message, error) {
-	header, err := RecvAll(socket, messageHeaderSize)
-	if err != nil {
+	return RecvMessageInto(socket, make([]byte, messageHeaderSize), nil)
+}
+
+func RecvMessageInto(socket io.Reader, header []byte, payload []byte) (Message, error) {
+	if len(header) < messageHeaderSize {
+		return Message{}, fmt.Errorf("message header buffer must contain at least %d bytes", messageHeaderSize)
+	}
+	if err := recvAllInto(socket, header[:messageHeaderSize]); err != nil {
 		return Message{}, err
 	}
 
@@ -119,8 +141,12 @@ func RecvMessage(socket io.Reader) (Message, error) {
 	if payloadSize > maxPayloadSize {
 		return Message{}, fmt.Errorf("payload exceeds %d bytes", maxPayloadSize)
 	}
-	payload, err := RecvAll(socket, payloadSize)
-	if err != nil {
+	if cap(payload) < payloadSize {
+		payload = make([]byte, payloadSize)
+	} else {
+		payload = payload[:payloadSize]
+	}
+	if err := recvAllInto(socket, payload); err != nil {
 		return Message{}, err
 	}
 
