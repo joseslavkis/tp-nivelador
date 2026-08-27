@@ -19,17 +19,11 @@ def recv_all(sock: socket.socket, size: int) -> bytes:
         return b""
 
     received = _RECEIVE_BUFFERS.pop(sock, bytearray())
-    empty_reads = 0
 
     while len(received) < size:
         chunk = sock.recv(size)
         if not chunk:
-            empty_reads += 1
-            if empty_reads >= MAX_EMPTY_OPERATIONS:
-                raise ConnectionError("socket made no progress while receiving data")
-            continue
-
-        empty_reads = 0
+            raise ConnectionError("connection closed while receiving data")
         received.extend(chunk)
 
     result = bytes(received[:size])
