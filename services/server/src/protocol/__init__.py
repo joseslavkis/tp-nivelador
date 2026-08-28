@@ -10,4 +10,5 @@ from .messages import (
     decode_bet_batch,
     encode_bet,
     encode_bet_batch,
+    iter_bet_batch,
 )

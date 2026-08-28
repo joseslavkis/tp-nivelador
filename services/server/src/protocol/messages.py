@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 UINT16_SIZE = 2
@@ -91,6 +92,10 @@ def encode_bet_batch(bets: list[BetPayload]) -> bytes:
 
 
 def decode_bet_batch(payload: bytes) -> list[BetPayload]:
+    return list(iter_bet_batch(payload))
+
+
+def iter_bet_batch(payload: bytes) -> Iterator[BetPayload]:
     if len(payload) > MAX_BATCH_PAYLOAD_SIZE:
         raise ValueError(
             f"bet batch payload exceeds {MAX_BATCH_PAYLOAD_SIZE} bytes"
@@ -102,7 +107,6 @@ def decode_bet_batch(payload: bytes) -> list[BetPayload]:
     if bet_count == 0:
         raise ValueError("bet batch cannot be empty")
 
-    bets = []
     offset = UINT32_SIZE
     for index in range(bet_count):
         if len(payload) - offset < UINT32_SIZE:
@@ -118,7 +122,7 @@ def decode_bet_batch(payload: bytes) -> list[BetPayload]:
             raise ValueError(f"bet batch payload is missing data for bet {index}")
 
         try:
-            bets.append(decode_bet(payload[offset:end]))
+            yield decode_bet(payload[offset:end])
         except ValueError as error:
             raise ValueError(f"decode bet {index}: {error}") from error
         offset = end
@@ -127,8 +131,6 @@ def decode_bet_batch(payload: bytes) -> list[BetPayload]:
         raise ValueError(
             f"bet batch payload has {len(payload) - offset} trailing bytes"
         )
-
-    return bets
 
 
 def _encode_uint(value: int, size: int, field: str) -> bytes:

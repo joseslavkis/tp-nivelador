@@ -8,6 +8,7 @@ import safe_socket
 from lottery import Bet, Lottery
 
 MAX_BETS_PER_SESSION = 1_000_000
+BET_STORAGE_CHUNK_SIZE = 1024
 
 
 class ClientProtocolError(Exception):
@@ -43,37 +44,14 @@ class Server:
                     message_type, payload = safe_socket.recv_message(client_socket)
 
                     if message_type == protocol.MESSAGE_TYPE_BETS_BATCH:
-                        bet_payloads = protocol.decode_bet_batch(payload)
-                        if (
-                            len(bet_payloads)
-                            > MAX_BETS_PER_SESSION - bet_amount
-                        ):
-                            raise ValueError(
-                                f"session exceeds {MAX_BETS_PER_SESSION} bets"
-                            )
-
-                        batch_agency_id = bet_payloads[0].agency_id
-                        if any(
-                            bet.agency_id != batch_agency_id
-                            for bet in bet_payloads
-                        ):
-                            raise ValueError(
-                                "all bets in a batch must use one agency id"
-                            )
-                        if agency_id is not None and agency_id != batch_agency_id:
-                            raise ValueError(
-                                "all bets in a connection must use one agency id"
-                            )
-
-                        self._store_bets(
+                        batch_agency_id, batch_size = self._store_bet_batch(
                             lottery,
-                            [
-                                self._to_domain_bet(bet)
-                                for bet in bet_payloads
-                            ],
+                            payload,
+                            agency_id,
+                            MAX_BETS_PER_SESSION - bet_amount,
                         )
                         agency_id = batch_agency_id
-                        bet_amount += len(bet_payloads)
+                        bet_amount += batch_size
                         safe_socket.send_message(
                             client_socket,
                             protocol.MESSAGE_TYPE_BATCH_ACK,
@@ -118,6 +96,47 @@ class Server:
                     error,
                 )
                 raise
+
+    def _store_bet_batch(
+        self,
+        lottery: Lottery,
+        payload: bytes,
+        session_agency_id: int | None,
+        remaining_bet_capacity: int,
+    ) -> tuple[int, int]:
+        bets: list[Bet] = []
+        batch_agency_id: int | None = None
+        bet_count = 0
+
+        for bet_payload in protocol.iter_bet_batch(payload):
+            if bet_count == remaining_bet_capacity:
+                raise ValueError(
+                    f"session exceeds {MAX_BETS_PER_SESSION} bets"
+                )
+            if batch_agency_id is None:
+                batch_agency_id = bet_payload.agency_id
+            elif bet_payload.agency_id != batch_agency_id:
+                raise ValueError("all bets in a batch must use one agency id")
+            if (
+                session_agency_id is not None
+                and bet_payload.agency_id != session_agency_id
+            ):
+                raise ValueError(
+                    "all bets in a connection must use one agency id"
+                )
+
+            bets.append(self._to_domain_bet(bet_payload))
+            bet_count += 1
+            if len(bets) == BET_STORAGE_CHUNK_SIZE:
+                self._store_bets(lottery, bets)
+                bets.clear()
+
+        if bets:
+            self._store_bets(lottery, bets)
+        if batch_agency_id is None:
+            raise ValueError("bet batch cannot be empty")
+
+        return batch_agency_id, bet_count
 
     @staticmethod
     def _store_bets(lottery: Lottery, bets: list[Bet]) -> None:
