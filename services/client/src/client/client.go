@@ -120,38 +120,42 @@ func (client *Client) sendBets(reader *csvBytesReader) error {
 		if err != nil {
 			return fmt.Errorf("parse input record %d: %w", recordID, err)
 		}
-		if err := encoder.Append(
-			client.config.AgencyID,
-			record[0],
-			record[1],
-			document,
-			record[3],
-			number,
-		); err != nil {
-			return fmt.Errorf("encode input record %d: %w", recordID, err)
+		for {
+			appended, err := encoder.TryAppend(
+				client.config.AgencyID,
+				record[0],
+				record[1],
+				document,
+				record[3],
+				number,
+			)
+			if err != nil {
+				return fmt.Errorf("encode input record %d: %w", recordID, err)
+			}
+			if appended {
+				break
+			}
+			if encoder.Count() == 0 {
+				return fmt.Errorf("encode input record %d: bet exceeds maximum batch payload", recordID)
+			}
+			if err := client.flushBetBatch(&encoder, batchID); err != nil {
+				return err
+			}
+			batchID++
 		}
 		recordID++
 		if encoder.Count() < client.config.BatchSize {
 			continue
 		}
 
-		payload, err := encoder.Payload()
-		if err != nil {
-			return fmt.Errorf("encode bet batch %d: %w", batchID, err)
-		}
-		if err := client.sendBetBatch(payload, batchID); err != nil {
+		if err := client.flushBetBatch(&encoder, batchID); err != nil {
 			return err
 		}
-		encoder.Reset(payload)
 		batchID++
 	}
 
 	if encoder.Count() > 0 {
-		payload, err := encoder.Payload()
-		if err != nil {
-			return fmt.Errorf("encode bet batch %d: %w", batchID, err)
-		}
-		if err := client.sendBetBatch(payload, batchID); err != nil {
+		if err := client.flushBetBatch(&encoder, batchID); err != nil {
 			return err
 		}
 	}
@@ -161,6 +165,18 @@ func (client *Client) sendBets(reader *csvBytesReader) error {
 	}, client.messageHeader); err != nil {
 		return fmt.Errorf("send end of bets: %w", err)
 	}
+	return nil
+}
+
+func (client *Client) flushBetBatch(encoder *protocol.BetBatchEncoder, batchID int) error {
+	payload, err := encoder.Payload()
+	if err != nil {
+		return fmt.Errorf("encode bet batch %d: %w", batchID, err)
+	}
+	if err := client.sendBetBatch(payload, batchID); err != nil {
+		return err
+	}
+	encoder.Reset(payload)
 	return nil
 }
 

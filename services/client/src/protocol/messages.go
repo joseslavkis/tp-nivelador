@@ -39,34 +39,34 @@ func (encoder *BetBatchEncoder) Reset(payload []byte) {
 	encoder.count = 0
 }
 
-func (encoder *BetBatchEncoder) Append(
+func (encoder *BetBatchEncoder) TryAppend(
 	agencyID uint32,
 	firstName []byte,
 	lastName []byte,
 	document uint64,
 	birthdate []byte,
 	number uint32,
-) error {
+) (bool, error) {
 	if len(encoder.payload) < uint32Size {
 		encoder.Reset(encoder.payload)
 	}
 	if err := validateTextBytes(firstName, "first name"); err != nil {
-		return err
+		return false, err
 	}
 	if err := validateTextBytes(lastName, "last name"); err != nil {
-		return err
+		return false, err
 	}
 	if err := validateTextBytes(birthdate, "birthdate"); err != nil {
-		return err
+		return false, err
 	}
 	if encoder.count == ^uint32(0) {
-		return fmt.Errorf("bet batch contains too many bets")
+		return false, fmt.Errorf("bet batch contains too many bets")
 	}
 
 	encodedBetSize := uint32Size + encodedBytesSize(firstName) + encodedBytesSize(lastName) +
 		uint64Size + encodedBytesSize(birthdate) + uint32Size
 	if encodedBetSize > maxBatchPayloadSize-len(encoder.payload)-uint32Size {
-		return fmt.Errorf("bet batch payload exceeds %d bytes", maxBatchPayloadSize)
+		return false, nil
 	}
 
 	offset := len(encoder.payload)
@@ -82,7 +82,7 @@ func (encoder *BetBatchEncoder) Append(
 		number,
 	)
 	encoder.count++
-	return nil
+	return true, nil
 }
 
 func (encoder *BetBatchEncoder) Count() int {
