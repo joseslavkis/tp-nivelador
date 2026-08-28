@@ -7,7 +7,10 @@ import (
 	"io"
 )
 
-const csvFieldCount = 5
+const (
+	csvFieldCount    = 5
+	maxCSVRecordSize = 512 * 1024
+)
 
 var errUnterminatedQuotedField = errors.New("unterminated quoted field")
 
@@ -26,6 +29,12 @@ func (reader *csvBytesReader) Read() ([csvFieldCount][]byte, error) {
 	for {
 		fragment, readErr := reader.reader.ReadSlice('\n')
 		reader.recordBuffer = append(reader.recordBuffer, fragment...)
+		if len(reader.recordBuffer) > maxCSVRecordSize {
+			return [csvFieldCount][]byte{}, fmt.Errorf(
+				"record exceeds maximum size of %d bytes",
+				maxCSVRecordSize,
+			)
+		}
 		if errors.Is(readErr, bufio.ErrBufferFull) {
 			continue
 		}
