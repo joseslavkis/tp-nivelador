@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -81,11 +82,21 @@ func (client *Client) Run() error {
 	}
 	defer inputFile.Close()
 
-	outputFile, err := os.Create(client.config.OutputFile)
+	outputFile, err := os.CreateTemp(
+		filepath.Dir(client.config.OutputFile),
+		"."+filepath.Base(client.config.OutputFile)+".tmp-*",
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("create temporary output file: %w", err)
 	}
-	defer outputFile.Close()
+	temporaryOutputPath := outputFile.Name()
+	defer func() {
+		_ = outputFile.Close()
+		_ = os.Remove(temporaryOutputPath)
+	}()
+	if err := outputFile.Chmod(0o644); err != nil {
+		return fmt.Errorf("set temporary output file permissions: %w", err)
+	}
 
 	reader := newCSVBytesReader(inputFile)
 	if err := client.sendBets(reader); err != nil {
@@ -95,6 +106,12 @@ func (client *Client) Run() error {
 	writer := csv.NewWriter(outputFile)
 	if err := client.receiveWinners(writer); err != nil {
 		return err
+	}
+	if err := outputFile.Close(); err != nil {
+		return fmt.Errorf("close temporary output file: %w", err)
+	}
+	if err := os.Rename(temporaryOutputPath, client.config.OutputFile); err != nil {
+		return fmt.Errorf("publish output file: %w", err)
 	}
 
 	logger.Info(processInputFileAction, logger.Success, "agency-id", client.config.AgencyID)
