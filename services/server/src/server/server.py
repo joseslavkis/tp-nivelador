@@ -1,6 +1,7 @@
 import os
 import socket
 import tempfile
+import threading
 
 import logger
 import protocol
@@ -21,11 +22,21 @@ class ClientStorageError(Exception):
 
 class Server:
     def __init__(
-        self, server_host: str, server_port: int, storage_directory: str
+        self,
+        server_host: str,
+        server_port: int,
+        storage_directory: str,
+        agency_quorum_min: int,
     ) -> None:
+        if agency_quorum_min <= 0:
+            raise ValueError("AGENCY_QUORUM_MIN must be a positive integer")
+
         self.server_host = server_host
         self.server_port = server_port
         self.storage_directory = storage_directory
+        self._agency_quorum_min = agency_quorum_min
+        self._completed_agencies: set[int] = set()
+        self._quorum_condition = threading.Condition()
         os.makedirs(storage_directory, exist_ok=True)
 
     def _handle_client(self, client_socket: socket.socket) -> None:
@@ -60,9 +71,16 @@ class Server:
                         continue
 
                     if message_type == protocol.MESSAGE_TYPE_END:
-                        if payload:
-                            raise ValueError("end message must have an empty payload")
-                        self._send_winners(client_socket, agency_id, lottery)
+                        end_agency_id = protocol.decode_agency_id(payload)
+                        if agency_id is not None and agency_id != end_agency_id:
+                            raise ValueError(
+                                "end agency id must match batch agency id"
+                            )
+                        agency_id = end_agency_id
+                        self._wait_for_quorum(agency_id)
+                        self._send_winners(
+                            client_socket, agency_id, bet_amount, lottery
+                        )
                         logger.info(
                             action,
                             logger.LogResult.success,
@@ -96,6 +114,29 @@ class Server:
                     error,
                 )
                 raise
+
+    def _wait_for_quorum(self, agency_id: int) -> None:
+        with self._quorum_condition:
+            self._completed_agencies.add(agency_id)
+            if len(self._completed_agencies) >= self._agency_quorum_min:
+                self._quorum_condition.notify_all()
+
+            self._quorum_condition.wait_for(
+                lambda: len(self._completed_agencies)
+                >= self._agency_quorum_min
+            )
+            completed_agency_count = len(self._completed_agencies)
+
+        logger.info(
+            "wait-agency-quorum",
+            logger.LogResult.success,
+            "agency-id",
+            agency_id,
+            "completed-agencies",
+            completed_agency_count,
+            "required-agencies",
+            self._agency_quorum_min,
+        )
 
     def _store_bet_batch(
         self,
@@ -146,9 +187,13 @@ class Server:
             raise ClientStorageError("failed to store bets") from error
 
     def _send_winners(
-        self, client_socket: socket.socket, agency_id: int | None, lottery: Lottery
+        self,
+        client_socket: socket.socket,
+        agency_id: int,
+        bet_amount: int,
+        lottery: Lottery,
     ) -> None:
-        if agency_id is not None:
+        if bet_amount > 0:
             stored_bets = iter(lottery.load_bets())
             while True:
                 try:
@@ -210,14 +255,27 @@ class Server:
             while True:
                 try:
                     logger.info(action, logger.LogResult.in_progress)
-                    client_socket, _ = server_socket.accept()
+                    client_socket, client_address = server_socket.accept()
                 except OSError as error:
                     logger.error(action, logger.LogResult.fail, "err", error)
                     raise
                 logger.info(action, logger.LogResult.success)
 
+                client_thread = threading.Thread(
+                    target=self._handle_client_connection,
+                    args=(client_socket,),
+                    name=f"client-{client_address[0]}:{client_address[1]}",
+                    daemon=False,
+                )
                 try:
-                    with client_socket:
-                        self._handle_client(client_socket)
-                except (ClientProtocolError, ClientStorageError, ConnectionError):
-                    continue
+                    client_thread.start()
+                except RuntimeError:
+                    client_socket.close()
+                    raise
+
+    def _handle_client_connection(self, client_socket: socket.socket) -> None:
+        try:
+            with client_socket:
+                self._handle_client(client_socket)
+        except (ClientProtocolError, ClientStorageError, ConnectionError):
+            return

@@ -178,7 +178,8 @@ func (client *Client) sendBets(reader *csvBytesReader) error {
 	}
 
 	if err := safe_socket.SendMessageWithHeader(client.conn, safe_socket.Message{
-		Type: safe_socket.MessageTypeEnd,
+		Type:    safe_socket.MessageTypeEnd,
+		Payload: protocol.EncodeAgencyID(client.config.AgencyID),
 	}, client.messageHeader); err != nil {
 		return fmt.Errorf("send end of bets: %w", err)
 	}

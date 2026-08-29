@@ -97,6 +97,12 @@ func (encoder *BetBatchEncoder) Payload() ([]byte, error) {
 	return encoder.payload, nil
 }
 
+func EncodeAgencyID(agencyID uint32) []byte {
+	payload := make([]byte, uint32Size)
+	binary.BigEndian.PutUint32(payload, agencyID)
+	return payload
+}
+
 func EncodeBet(bet BetPayload) ([]byte, error) {
 	if err := validateBet(bet); err != nil {
 		return nil, err

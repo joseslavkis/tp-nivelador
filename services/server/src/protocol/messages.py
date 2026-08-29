@@ -61,6 +61,14 @@ def decode_bet(payload: bytes) -> BetPayload:
     )
 
 
+def decode_agency_id(payload: bytes) -> int:
+    if len(payload) != UINT32_SIZE:
+        raise ValueError(
+            f"agency id payload must contain {UINT32_SIZE} bytes"
+        )
+    return int.from_bytes(payload, byteorder="big")
+
+
 def encode_bet_batch(bets: list[BetPayload]) -> bytes:
     if not bets:
         raise ValueError("bet batch cannot be empty")

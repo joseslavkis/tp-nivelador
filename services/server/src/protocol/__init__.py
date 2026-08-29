@@ -6,6 +6,7 @@ from .messages import (
     MESSAGE_TYPE_ERROR,
     MESSAGE_TYPE_WINNER,
     BetPayload,
+    decode_agency_id,
     decode_bet,
     decode_bet_batch,
     encode_bet,
