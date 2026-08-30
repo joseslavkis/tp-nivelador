@@ -20,6 +20,10 @@ class ClientStorageError(Exception):
     pass
 
 
+class ServerShutdown(Exception):
+    pass
+
+
 class Server:
     def __init__(
         self,
@@ -37,6 +41,11 @@ class Server:
         self._agency_quorum_min = agency_quorum_min
         self._completed_agencies: set[int] = set()
         self._quorum_condition = threading.Condition()
+        self._shutdown_event = threading.Event()
+        self._state_lock = threading.Lock()
+        self._server_socket: socket.socket | None = None
+        self._client_sockets: set[socket.socket] = set()
+        self._client_threads: set[threading.Thread] = set()
         os.makedirs(storage_directory, exist_ok=True)
 
     def _handle_client(self, client_socket: socket.socket) -> None:
@@ -52,6 +61,7 @@ class Server:
             try:
                 logger.info(action, logger.LogResult.in_progress)
                 while True:
+                    self._raise_if_shutdown()
                     message_type, payload = safe_socket.recv_message(client_socket)
 
                     if message_type == protocol.MESSAGE_TYPE_BETS_BATCH:
@@ -77,7 +87,8 @@ class Server:
                                 "end agency id must match batch agency id"
                             )
                         agency_id = end_agency_id
-                        self._wait_for_quorum(agency_id)
+                        if not self._wait_for_quorum(agency_id):
+                            return
                         self._send_winners(
                             client_socket, agency_id, bet_amount, lottery
                         )
@@ -115,7 +126,7 @@ class Server:
                 )
                 raise
 
-    def _wait_for_quorum(self, agency_id: int) -> None:
+    def _wait_for_quorum(self, agency_id: int) -> bool:
         with self._quorum_condition:
             self._completed_agencies.add(agency_id)
             if len(self._completed_agencies) >= self._agency_quorum_min:
@@ -124,8 +135,12 @@ class Server:
             self._quorum_condition.wait_for(
                 lambda: len(self._completed_agencies)
                 >= self._agency_quorum_min
+                or self._shutdown_event.is_set()
             )
             completed_agency_count = len(self._completed_agencies)
+
+        if self._shutdown_event.is_set():
+            return False
 
         logger.info(
             "wait-agency-quorum",
@@ -137,6 +152,7 @@ class Server:
             "required-agencies",
             self._agency_quorum_min,
         )
+        return True
 
     def _store_bet_batch(
         self,
@@ -150,6 +166,7 @@ class Server:
         bet_count = 0
 
         for bet_payload in protocol.iter_bet_batch(payload):
+            self._raise_if_shutdown()
             if bet_count == remaining_bet_capacity:
                 raise ValueError(
                     f"session exceeds {MAX_BETS_PER_SESSION} bets"
@@ -196,6 +213,7 @@ class Server:
         if bet_amount > 0:
             stored_bets = iter(lottery.load_bets())
             while True:
+                self._raise_if_shutdown()
                 try:
                     bet = next(stored_bets)
                 except StopIteration:
@@ -252,30 +270,113 @@ class Server:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
             server_socket.bind((self.server_host, self.server_port))
             server_socket.listen()
-            while True:
-                try:
-                    logger.info(action, logger.LogResult.in_progress)
-                    client_socket, client_address = server_socket.accept()
-                except OSError as error:
-                    logger.error(action, logger.LogResult.fail, "err", error)
-                    raise
-                logger.info(action, logger.LogResult.success)
+            with self._state_lock:
+                if self._shutdown_event.is_set():
+                    return
+                self._server_socket = server_socket
 
-                client_thread = threading.Thread(
-                    target=self._handle_client_connection,
-                    args=(client_socket,),
-                    name=f"client-{client_address[0]}:{client_address[1]}",
-                    daemon=False,
-                )
-                try:
-                    client_thread.start()
-                except RuntimeError:
-                    client_socket.close()
-                    raise
+            try:
+                while not self._shutdown_event.is_set():
+                    self._reap_client_threads()
+                    try:
+                        logger.info(action, logger.LogResult.in_progress)
+                        client_socket, client_address = server_socket.accept()
+                    except OSError as error:
+                        if self._shutdown_event.is_set():
+                            break
+                        logger.error(action, logger.LogResult.fail, "err", error)
+                        raise
+                    logger.info(action, logger.LogResult.success)
+
+                    with self._state_lock:
+                        if self._shutdown_event.is_set():
+                            client_socket.close()
+                            break
+                        self._client_sockets.add(client_socket)
+
+                    client_thread = threading.Thread(
+                        target=self._handle_client_connection,
+                        args=(client_socket,),
+                        name=f"client-{client_address[0]}:{client_address[1]}",
+                        daemon=False,
+                    )
+                    try:
+                        client_thread.start()
+                    except RuntimeError:
+                        with self._state_lock:
+                            self._client_sockets.discard(client_socket)
+                        client_socket.close()
+                        raise
+                    with self._state_lock:
+                        self._client_threads.add(client_thread)
+            finally:
+                self.shutdown()
+                with self._state_lock:
+                    client_threads = tuple(self._client_threads)
+                for client_thread in client_threads:
+                    client_thread.join()
+                with self._state_lock:
+                    self._server_socket = None
+                    self._client_threads.clear()
+
+    def _reap_client_threads(self) -> None:
+        with self._state_lock:
+            completed_threads = tuple(
+                thread
+                for thread in self._client_threads
+                if not thread.is_alive()
+            )
+            self._client_threads.difference_update(completed_threads)
+
+        for client_thread in completed_threads:
+            client_thread.join()
+
+    def shutdown(self) -> None:
+        self.request_shutdown()
+        with self._state_lock:
+            client_sockets = tuple(self._client_sockets)
+
+        for client_socket in client_sockets:
+            self._close_socket(client_socket)
+
+        with self._quorum_condition:
+            self._quorum_condition.notify_all()
+
+    def request_shutdown(self) -> None:
+        self._shutdown_event.set()
+        server_socket = self._server_socket
+        if server_socket is not None:
+            self._close_socket(server_socket)
+
+    def _raise_if_shutdown(self) -> None:
+        if self._shutdown_event.is_set():
+            raise ServerShutdown
+
+    @staticmethod
+    def _close_socket(sock: socket.socket) -> None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
     def _handle_client_connection(self, client_socket: socket.socket) -> None:
         try:
             with client_socket:
                 self._handle_client(client_socket)
-        except (ClientProtocolError, ClientStorageError, ConnectionError):
+        except (
+            ClientProtocolError,
+            ClientStorageError,
+            ConnectionError,
+            ServerShutdown,
+        ):
             return
+        except OSError:
+            if not self._shutdown_event.is_set():
+                raise
+        finally:
+            with self._state_lock:
+                self._client_sockets.discard(client_socket)

@@ -1,4 +1,5 @@
 import os
+import signal
 import sys
 
 import logger
@@ -24,6 +25,16 @@ def _load_agency_quorum_min() -> int:
 
 
 def main() -> int:
+    server_instance: server.Server | None = None
+    shutdown_requested = False
+
+    def handle_sigterm(_signum, _frame) -> None:
+        nonlocal shutdown_requested
+        shutdown_requested = True
+        if server_instance is not None:
+            server_instance.request_shutdown()
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
     logger.init()
     try:
         server_instance = server.Server(
@@ -32,8 +43,12 @@ def main() -> int:
             storage_directory=os.environ.get("STORAGE_DIRECTORY", "/tmp/lottery"),
             agency_quorum_min=_load_agency_quorum_min(),
         )
+        if shutdown_requested:
+            server_instance.request_shutdown()
         server_instance.run()
     except Exception as error:
+        if shutdown_requested:
+            return 0
         logger.error("server-run", logger.LogResult.fail, "err", error)
         return 1
     return 0

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -38,8 +39,8 @@ type Client struct {
 	receivePayload []byte
 }
 
-func NewClient(config ClientConfig) (*Client, error) {
-	conn, err := connectToServer(config.ServerHost, config.ServerPort)
+func NewClient(ctx context.Context, config ClientConfig) (*Client, error) {
+	conn, err := connectToServer(ctx, config.ServerHost, config.ServerPort)
 	if err != nil {
 		logger.Warn("connect-to-server", logger.Fail)
 		return nil, err
@@ -53,16 +54,26 @@ func NewClient(config ClientConfig) (*Client, error) {
 	return client, nil
 }
 
-func connectToServer(host, port string) (net.Conn, error) {
+func connectToServer(ctx context.Context, host, port string) (net.Conn, error) {
 	var err error
 	var conn net.Conn
+	dialer := net.Dialer{}
 
 	logger.Info(connectToServerAction, logger.InProgress)
 	for i := range maxConnectionAttempts {
-		conn, err = net.Dial("tcp", host+":"+port)
+		conn, err = dialer.DialContext(ctx, "tcp", host+":"+port)
 		if err != nil {
 			logger.Warn(connectToServerAction, logger.Fail, "attempt", i)
-			time.Sleep(connectionAttemptDelay)
+			if ctx.Err() != nil || i == maxConnectionAttempts-1 {
+				break
+			}
+			timer := time.NewTimer(connectionAttemptDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
 			continue
 		}
 
@@ -73,7 +84,11 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
-func (client *Client) Run() error {
+func (client *Client) Run(ctx context.Context) error {
+	stopClose := context.AfterFunc(ctx, func() {
+		_ = client.conn.Close()
+	})
+	defer stopClose()
 	defer client.conn.Close()
 
 	inputFile, err := os.Open(client.config.InputFile)
@@ -99,7 +114,7 @@ func (client *Client) Run() error {
 	}
 
 	reader := newCSVBytesReader(inputFile)
-	if err := client.sendBets(reader); err != nil {
+	if err := client.sendBets(ctx, reader); err != nil {
 		return err
 	}
 
@@ -119,12 +134,18 @@ func (client *Client) Run() error {
 	return nil
 }
 
-func (client *Client) sendBets(reader *csvBytesReader) error {
+func (client *Client) sendBets(
+	ctx context.Context,
+	reader *csvBytesReader,
+) error {
 	var encoder protocol.BetBatchEncoder
 	encoder.Reset(nil)
 	batchID := 0
 	recordID := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		record, err := reader.Read()
 		if errors.Is(err, io.EOF) {
 			break
