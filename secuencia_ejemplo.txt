@@ -1,0 +1,58 @@
+[TYPE: BETS_BATCH]
+[05]
+
+[PAYLOAD LENGTH: 60 bytes]
+[00 00 00 3C]
+
+[PAYLOAD]
+[
+    [BET COUNT: 1]
+    [00 00 00 01]
+
+    [BET LENGTH: 52 bytes]
+    [00 00 00 34]
+
+    [AGENCY ID: 0]
+    [00 00 00 00]
+
+    [FIRST NAME LENGTH: 15 bytes]
+    [00 0F]
+
+    [FIRST NAME: "Santiago Lionel"]
+    [53 61 6E 74 69 61 67 6F 20 4C 69 6F 6E 65 6C]
+
+    [LAST NAME LENGTH: 5 bytes]
+    [00 05]
+
+    [LAST NAME: "Lorca"]
+    [4C 6F 72 63 61]
+
+    [DOCUMENT: 30904465]
+    [00 00 00 00 01 D7 90 91]
+
+    [BIRTHDATE LENGTH: 10 bytes]
+    [00 0A]
+
+    [BIRTHDATE: "1999-03-17"]
+    [31 39 39 39 2D 30 33 2D 31 37]
+
+    [NUMBER: 7574]
+    [00 00 1D 96]
+]
+La secuencia completa, sin descripciones, es:
+[05]
+[00 00 00 3C]
+[
+  [00 00 00 01]
+  [00 00 00 34]
+  [00 00 00 00]
+  [00 0F][53 61 6E 74 69 61 67 6F 20 4C 69 6F 6E 65 6C]
+  [00 05][4C 6F 72 63 61]
+  [00 00 00 00 01 D7 90 91]
+  [00 0A][31 39 39 39 2D 30 33 2D 31 37]
+  [00 00 1D 96]
+]
+Tamaños totales:
+Header TLV:        5 bytes
+Payload del batch: 60 bytes
+Mensaje completo:  65 bytes
