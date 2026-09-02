@@ -103,16 +103,6 @@ func EncodeAgencyID(agencyID uint32) []byte {
 	return payload
 }
 
-func EncodeBet(bet BetPayload) ([]byte, error) {
-	if err := validateBet(bet); err != nil {
-		return nil, err
-	}
-
-	payload := make([]byte, betPayloadSize(bet))
-	writeBet(payload, bet)
-	return payload, nil
-}
-
 func DecodeBet(payload []byte) (BetPayload, error) {
 	decoder := payloadDecoder{payload: payload}
 
@@ -154,100 +144,6 @@ func DecodeBet(payload []byte) (BetPayload, error) {
 	}, nil
 }
 
-func EncodeBetBatch(bets []BetPayload) ([]byte, error) {
-	if len(bets) == 0 {
-		return nil, fmt.Errorf("bet batch cannot be empty")
-	}
-	if uint64(len(bets)) > uint64(^uint32(0)) {
-		return nil, fmt.Errorf("bet batch contains too many bets: %d", len(bets))
-	}
-
-	payloadSize := uint32Size
-	for index, bet := range bets {
-		if err := validateBet(bet); err != nil {
-			return nil, fmt.Errorf("encode bet %d: %w", index, err)
-		}
-		encodedBetSize := betPayloadSize(bet)
-		if encodedBetSize > maxBatchPayloadSize-payloadSize-uint32Size {
-			return nil, fmt.Errorf("bet batch payload exceeds %d bytes", maxBatchPayloadSize)
-		}
-		payloadSize += uint32Size + encodedBetSize
-	}
-
-	payload := make([]byte, payloadSize)
-	binary.BigEndian.PutUint32(payload, uint32(len(bets)))
-	offset := uint32Size
-	for _, bet := range bets {
-		encodedBetSize := betPayloadSize(bet)
-		binary.BigEndian.PutUint32(payload[offset:], uint32(encodedBetSize))
-		offset += uint32Size
-		writeBet(payload[offset:offset+encodedBetSize], bet)
-		offset += encodedBetSize
-	}
-
-	return payload, nil
-}
-
-func DecodeBetBatch(payload []byte) ([]BetPayload, error) {
-	if len(payload) > maxBatchPayloadSize {
-		return nil, fmt.Errorf("bet batch payload exceeds %d bytes", maxBatchPayloadSize)
-	}
-	if len(payload) < uint32Size {
-		return nil, fmt.Errorf("bet batch payload is missing bet count")
-	}
-
-	betCount := binary.BigEndian.Uint32(payload)
-	if betCount == 0 {
-		return nil, fmt.Errorf("bet batch cannot be empty")
-	}
-
-	bets := make([]BetPayload, 0)
-	offset := uint32Size
-	for index := uint32(0); index < betCount; index++ {
-		if len(payload)-offset < uint32Size {
-			return nil, fmt.Errorf("bet batch payload is missing length for bet %d", index)
-		}
-		betLength := int(binary.BigEndian.Uint32(payload[offset:]))
-		offset += uint32Size
-		if betLength > len(payload)-offset {
-			return nil, fmt.Errorf("bet batch payload is missing data for bet %d", index)
-		}
-
-		bet, err := DecodeBet(payload[offset : offset+betLength])
-		if err != nil {
-			return nil, fmt.Errorf("decode bet %d: %w", index, err)
-		}
-		bets = append(bets, bet)
-		offset += betLength
-	}
-
-	if offset != len(payload) {
-		return nil, fmt.Errorf("bet batch payload has %d trailing bytes", len(payload)-offset)
-	}
-
-	return bets, nil
-}
-
-func validateBet(bet BetPayload) error {
-	if err := validateText(bet.FirstName, "first name"); err != nil {
-		return err
-	}
-	if err := validateText(bet.LastName, "last name"); err != nil {
-		return err
-	}
-	return validateText(bet.Birthdate, "birthdate")
-}
-
-func validateText(value string, field string) error {
-	if !utf8.ValidString(value) {
-		return fmt.Errorf("%s is not valid UTF-8", field)
-	}
-	if len(value) > maxTextLength {
-		return fmt.Errorf("%s exceeds %d bytes", field, maxTextLength)
-	}
-	return nil
-}
-
 func validateTextBytes(value []byte, field string) error {
 	if !utf8.Valid(value) {
 		return fmt.Errorf("%s is not valid UTF-8", field)
@@ -258,32 +154,8 @@ func validateTextBytes(value []byte, field string) error {
 	return nil
 }
 
-func betPayloadSize(bet BetPayload) int {
-	return uint32Size + encodedTextSize(bet.FirstName) + encodedTextSize(bet.LastName) +
-		uint64Size + encodedTextSize(bet.Birthdate) + uint32Size
-}
-
-func encodedTextSize(value string) int {
-	return uint16Size + len(value)
-}
-
 func encodedBytesSize(value []byte) int {
 	return uint16Size + len(value)
-}
-
-func writeBet(payload []byte, bet BetPayload) {
-	offset := 0
-	binary.BigEndian.PutUint32(payload[offset:], bet.AgencyID)
-	offset += uint32Size
-
-	offset = writeText(payload, offset, bet.FirstName)
-	offset = writeText(payload, offset, bet.LastName)
-
-	binary.BigEndian.PutUint64(payload[offset:], bet.Document)
-	offset += uint64Size
-
-	offset = writeText(payload, offset, bet.Birthdate)
-	binary.BigEndian.PutUint32(payload[offset:], bet.Number)
 }
 
 func writeBetBytes(
@@ -307,13 +179,6 @@ func writeBetBytes(
 
 	offset = writeBytes(payload, offset, birthdate)
 	binary.BigEndian.PutUint32(payload[offset:], number)
-}
-
-func writeText(payload []byte, offset int, value string) int {
-	binary.BigEndian.PutUint16(payload[offset:], uint16(len(value)))
-	offset += uint16Size
-	copy(payload[offset:], value)
-	return offset + len(value)
 }
 
 func writeBytes(payload []byte, offset int, value []byte) int {

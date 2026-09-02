@@ -95,11 +95,6 @@ func recvAllInto(socket io.Reader, buffer []byte) error {
 	return nil
 }
 
-func SendMessage(socket io.Writer, message Message) error {
-	header := make([]byte, messageHeaderSize)
-	return SendMessageWithHeader(socket, message, header)
-}
-
 func SendMessageWithHeader(socket io.Writer, message Message, header []byte) error {
 	if !message.Type.isValid() {
 		return fmt.Errorf("invalid message type %d", message.Type)
@@ -119,10 +114,6 @@ func SendMessageWithHeader(socket io.Writer, message Message, header []byte) err
 	}
 
 	return SendAll(socket, message.Payload)
-}
-
-func RecvMessage(socket io.Reader) (Message, error) {
-	return RecvMessageInto(socket, make([]byte, messageHeaderSize), nil)
 }
 
 func RecvMessageInto(socket io.Reader, header []byte, payload []byte) (Message, error) {

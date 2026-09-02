@@ -8,8 +8,6 @@ from .messages import (
     BetPayload,
     decode_agency_id,
     decode_bet,
-    decode_bet_batch,
     encode_bet,
-    encode_bet_batch,
     iter_bet_batch,
 )

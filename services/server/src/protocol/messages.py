@@ -69,40 +69,6 @@ def decode_agency_id(payload: bytes) -> int:
     return int.from_bytes(payload, byteorder="big")
 
 
-def encode_bet_batch(bets: list[BetPayload]) -> bytes:
-    if not bets:
-        raise ValueError("bet batch cannot be empty")
-
-    encoded_bets = []
-    payload_size = UINT32_SIZE
-    for index, bet in enumerate(bets):
-        try:
-            encoded_bet = encode_bet(bet)
-        except (TypeError, ValueError) as error:
-            raise type(error)(f"encode bet {index}: {error}") from error
-        payload_size += UINT32_SIZE + len(encoded_bet)
-        if payload_size > MAX_BATCH_PAYLOAD_SIZE:
-            raise ValueError(
-                f"bet batch payload exceeds {MAX_BATCH_PAYLOAD_SIZE} bytes"
-            )
-        encoded_bets.append(encoded_bet)
-
-    return b"".join(
-        [
-            _encode_uint(len(encoded_bets), UINT32_SIZE, "bet count"),
-            *(
-                _encode_uint(len(encoded_bet), UINT32_SIZE, "bet length")
-                + encoded_bet
-                for encoded_bet in encoded_bets
-            ),
-        ]
-    )
-
-
-def decode_bet_batch(payload: bytes) -> list[BetPayload]:
-    return list(iter_bet_batch(payload))
-
-
 def iter_bet_batch(payload: bytes) -> Iterator[BetPayload]:
     if len(payload) > MAX_BATCH_PAYLOAD_SIZE:
         raise ValueError(
