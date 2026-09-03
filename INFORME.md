@@ -120,4 +120,12 @@ Por otro lado, el shutdown del cliente ejecuta el siguiente flujo:
 
 El cliente escribe en un archivo temporal y solo lo renombra cuando se completa el protocolo. Si antes de que pase eso llega el SIGTERM, se cierra y elimina el temporal. 
 
+# Justificación de librerias más importantes elegidas
 
+## Librerias del servidor
+
+- Threading: Las operaciones de I/O bound hacen que el uso de esta libreria sea muy beneficioso. El trabajo se basa en esperar conexiones (thread principal), recibir y enviar data por sockets (los threads no-daemon). El GIL es el global interpreter lock, de esta forma CPython procesa en un mismo proceso un solo thread que ejecute bytecode python al mismo tiempo. Si bien es un tecnicismo que parece que es una pésima idea para threads, en el caso del tp0, no es grave. 
+Para operaciones CPU bound, el GIL impide procesamiento paralelo y ahí si se nota más el problema. Calculos pesados no van a poder ejecutarse en paralelo sobre un cpu > 1 núcleo, porque un solo proceso va a generar que no se aprovechen ambos nucleos y que todo se ejecute concurrentemente cuando podria ser paralelo.
+
+Para nuestro caso, muchas veces los threads se encuentran bloqueados esperando: accept(), recv(), send(), leer archivos y el condition.wait_for(). En esos momentos, el thread esta en estado SLEEPING y no consume cpu, por lo que no es significativo el bloqueo del paralelismo en single-process. 
+Así es como el GIL se libera durante operaciones I/O.
