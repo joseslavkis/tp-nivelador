@@ -130,11 +130,11 @@ Para operaciones CPU bound, el GIL impide procesamiento paralelo y ahí si se no
 Para nuestro caso, muchas veces los threads se encuentran bloqueados esperando: accept(), recv(), send(), leer archivos y el condition.wait_for(). En esos momentos, el thread esta en estado SLEEPING y no consume cpu, por lo que no es significativo el bloqueo del paralelismo en single-process. 
 Así es como el GIL se libera durante operaciones I/O.
 
-- tempfile: Aquí se usa TemporaryDirectory otorga almacenamiento aislado por conexión. También permite que al finalizar la sesión, incluso ante errores o shutdown.
+- tempfile: Aquí se usa TemporaryDirectory otorga almacenamiento aislado por conexión. También permite que al finalizar la sesión, incluso ante errores o shutdown, se puedan desechar los archivos temporales.
 
 ## Librerias del cliente
 
-- encoding/binary: Se utiliza unicamente para convertir enteros de tamaño fijo hacia y desde big-endian. No se utiliza para deserializar ni serializar, ni define la estructura del protocolo.
+- encoding/binary: Se utiliza unicamente para convertir enteros de tamaño fijo hacia y desde big-endian. no define ni resuelve el protocolo completo..
 La estructura, los campos y las longitudes del protocolo se implementaron manualmente.
 
 - context: Permite propagar el error, pudiendo hacer una cancelación cooperativa durante una conexión, lectura de archivo y comunicación con el servidor. Esto ayuda mucho a hacer una salida graceful ante SIGTERM.
