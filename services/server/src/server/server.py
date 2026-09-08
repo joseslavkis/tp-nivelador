@@ -1,7 +1,7 @@
 import os
 import socket
 import threading
-from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import logger
 import protocol
@@ -24,6 +24,18 @@ class ServerShutdown(Exception):
     pass
 
 
+@dataclass
+class _RoundState:
+    round_id: int
+    admitted_workers: int = 0
+    active_workers: int = 0
+    agencies: set[int] = field(default_factory=set)
+    completed_agencies: set[int] = field(default_factory=set)
+    quorum_reached: bool = False
+    aborted: bool = False
+    closing: bool = False
+
+
 class Server:
     def __init__(
         self,
@@ -39,42 +51,96 @@ class Server:
         self.server_port = server_port
         self.storage_directory = storage_directory
         self._agency_quorum_min = agency_quorum_min
-        self._completed_agencies: set[int] = set()
+
         self._quorum_condition = threading.Condition()
+        self._round_counter = 0
+        self._current_round = _RoundState(self._round_counter)
+
         self._shutdown_event = threading.Event()
         self._state_lock = threading.Lock()
         self._server_socket: socket.socket | None = None
         self._client_sockets: set[socket.socket] = set()
         self._client_threads: set[threading.Thread] = set()
+
         os.makedirs(storage_directory, exist_ok=True)
         self._lottery = Lottery(os.path.join(storage_directory, "bets.csv"))
         self._lottery_lock = threading.Lock()
 
-    def _handle_client(self, client_socket: socket.socket) -> None:
-        session = _ClientSession(
-            client_socket=client_socket,
-            lottery=self._lottery,
-            lottery_lock=self._lottery_lock,
-            wait_for_quorum=self._wait_for_quorum,
-            raise_if_shutdown=self._raise_if_shutdown,
-        )
-        session.handle()
+        with self._lottery_lock:
+            self._clear_lottery_storage_locked()
 
-    def _wait_for_quorum(self, agency_id: int) -> bool:
+    def _handle_client(self, client_socket: socket.socket) -> None:
+        round_state = self._register_round_worker()
+        _ClientSession(client_socket, self, round_state).handle()
+
+    def _register_round_worker(self) -> _RoundState:
         with self._quorum_condition:
-            self._completed_agencies.add(agency_id)
-            if len(self._completed_agencies) >= self._agency_quorum_min:
+            self._quorum_condition.wait_for(
+                lambda: self._shutdown_event.is_set()
+                or (
+                    self._current_round is not None
+                    and not self._current_round.aborted
+                    and not self._current_round.closing
+                    and self._current_round.admitted_workers < self._agency_quorum_min
+                )
+            )
+            self._raise_if_shutdown()
+
+            round_state = self._current_round
+            if round_state is None:
+                raise ServerShutdown
+
+            round_state.admitted_workers += 1
+            round_state.active_workers += 1
+            return round_state
+
+    def _register_round_agency(
+        self, round_state: _RoundState, agency_id: int
+    ) -> None:
+        with self._quorum_condition:
+            self._raise_if_shutdown()
+
+            if self._current_round is not round_state or round_state.aborted:
+                raise ValueError("round is no longer active")
+
+            if agency_id in round_state.agencies:
+                round_state.aborted = True
+                self._quorum_condition.notify_all()
+                raise ValueError("agency already participates in the current round")
+
+            round_state.agencies.add(agency_id)
+
+    def _wait_for_quorum(self, round_state: _RoundState, agency_id: int) -> bool:
+        with self._quorum_condition:
+            self._raise_if_shutdown()
+
+            if self._current_round is not round_state or round_state.aborted:
+                return False
+
+            if agency_id not in round_state.agencies:
+                raise ValueError("agency was not registered in the current round")
+
+            if agency_id in round_state.completed_agencies:
+                round_state.aborted = True
+                self._quorum_condition.notify_all()
+                raise ValueError("agency already finalized the current round")
+
+            round_state.completed_agencies.add(agency_id)
+
+            if len(round_state.completed_agencies) == self._agency_quorum_min:
+                round_state.quorum_reached = True
                 self._quorum_condition.notify_all()
 
             self._quorum_condition.wait_for(
-                lambda: len(self._completed_agencies)
-                >= self._agency_quorum_min
-                or self._shutdown_event.is_set()
+                lambda: self._shutdown_event.is_set()
+                or round_state.aborted
+                or round_state.quorum_reached
             )
-            completed_agency_count = len(self._completed_agencies)
 
-        if self._shutdown_event.is_set():
-            return False
+            if self._shutdown_event.is_set() or round_state.aborted:
+                return False
+
+            completed_agency_count = len(round_state.completed_agencies)
 
         logger.info(
             "wait-agency-quorum",
@@ -85,8 +151,64 @@ class Server:
             completed_agency_count,
             "required-agencies",
             self._agency_quorum_min,
+            "round-id",
+            round_state.round_id,
         )
         return True
+
+    def _release_round_worker(
+        self, round_state: _RoundState, successful: bool
+    ) -> None:
+        with self._quorum_condition:
+            if round_state.active_workers <= 0:
+                return
+
+            if not successful and not self._shutdown_event.is_set():
+                round_state.aborted = True
+                self._quorum_condition.notify_all()
+
+            round_state.active_workers -= 1
+            should_close_round = (
+                round_state.active_workers == 0 and not round_state.closing
+            )
+            if should_close_round:
+                round_state.closing = True
+
+        if not should_close_round:
+            return
+
+        cleanup_error = None
+        try:
+            with self._lottery_lock:
+                self._clear_lottery_storage_locked()
+        except ClientStorageError as error:
+            cleanup_error = error
+
+        with self._quorum_condition:
+            if self._current_round is round_state:
+                self._current_round = None
+                if cleanup_error is None and not self._shutdown_event.is_set():
+                    self._round_counter += 1
+                    self._current_round = _RoundState(self._round_counter)
+            self._quorum_condition.notify_all()
+
+        if cleanup_error is not None:
+            self.request_shutdown()
+            raise cleanup_error
+
+        logger.info(
+            "round-closed",
+            logger.LogResult.success,
+            "round-id",
+            round_state.round_id,
+        )
+
+    def _clear_lottery_storage_locked(self) -> None:
+        try:
+            with open(self._lottery.storage_path, "w"):
+                pass
+        except OSError as error:
+            raise ClientStorageError("failed to clear bet storage") from error
 
     def run(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
@@ -106,7 +228,7 @@ class Server:
             if self._shutdown_event.is_set():
                 return False
             self._server_socket = server_socket
-        return True
+            return True
 
     def _accept_connections(self, server_socket: socket.socket) -> None:
         while not self._shutdown_event.is_set():
@@ -142,12 +264,10 @@ class Server:
                 client_socket.close()
                 return False
             self._client_sockets.add(client_socket)
-        return True
+            return True
 
     def _start_client_worker(
-        self,
-        client_socket: socket.socket,
-        client_address: tuple[str, int],
+        self, client_socket: socket.socket, client_address: tuple[str, int]
     ) -> None:
         client_thread = threading.Thread(
             target=self._handle_client_connection,
@@ -155,6 +275,7 @@ class Server:
             name=f"client-{client_address[0]}:{client_address[1]}",
             daemon=False,
         )
+
         try:
             client_thread.start()
         except RuntimeError:
@@ -162,6 +283,7 @@ class Server:
                 self._client_sockets.discard(client_socket)
             client_socket.close()
             raise
+
         with self._state_lock:
             self._client_threads.add(client_thread)
 
@@ -180,9 +302,7 @@ class Server:
     def _reap_client_threads(self) -> None:
         with self._state_lock:
             completed_threads = tuple(
-                thread
-                for thread in self._client_threads
-                if not thread.is_alive()
+                thread for thread in self._client_threads if not thread.is_alive()
             )
             self._client_threads.difference_update(completed_threads)
 
@@ -191,6 +311,7 @@ class Server:
 
     def shutdown(self) -> None:
         self.request_shutdown()
+
         with self._state_lock:
             client_sockets = tuple(self._client_sockets)
 
@@ -244,26 +365,26 @@ class _ClientSession:
     def __init__(
         self,
         client_socket: socket.socket,
-        lottery: Lottery,
-        lottery_lock: threading.Lock,
-        wait_for_quorum: Callable[[int], bool],
-        raise_if_shutdown: Callable[[], None],
+        server: Server,
+        round_state: _RoundState,
     ) -> None:
         self._client_socket = client_socket
-        self._lottery = lottery
-        self._lottery_lock = lottery_lock
-        self._wait_for_quorum = wait_for_quorum
-        self._raise_if_shutdown = raise_if_shutdown
+        self._server = server
+        self._round_state = round_state
         self._agency_id: int | None = None
+        self._round_agency_registered = False
         self._bet_amount = 0
 
     def handle(self) -> None:
         action = "handle-client"
+        successful = False
+
         try:
             logger.info(action, logger.LogResult.in_progress)
-            session_completed = self._receive_client_messages()
-            if not session_completed:
+            if not self._receive_client_messages():
                 return
+
+            successful = True
             logger.info(
                 action,
                 logger.LogResult.success,
@@ -276,23 +397,24 @@ class _ClientSession:
         except ClientStorageError as error:
             self._report_client_error(action, error)
             raise
+        finally:
+            self._server._release_round_worker(self._round_state, successful)
 
     def _receive_client_messages(self) -> bool:
         while True:
-            self._raise_if_shutdown()
+            self._server._raise_if_shutdown()
             message_type, payload = safe_socket.recv_message(self._client_socket)
 
             if message_type == protocol.MESSAGE_TYPE_BETS_BATCH:
                 self._handle_bets_batch(payload)
-                continue
-            if message_type == protocol.MESSAGE_TYPE_END:
+            elif message_type == protocol.MESSAGE_TYPE_END:
                 return self._handle_client_end(payload)
-
-            raise ValueError(f"unexpected client message type: {message_type}")
+            else:
+                raise ValueError(f"unexpected client message type: {message_type}")
 
     def _handle_bets_batch(self, payload: bytes) -> None:
-        batch_agency_id, batch_size = self._store_bet_batch(payload)
-        self._agency_id = batch_agency_id
+        self._prepare_batch_agency(payload)
+        _, batch_size = self._store_bet_batch(payload)
         self._bet_amount += batch_size
         safe_socket.send_message(
             self._client_socket,
@@ -300,22 +422,43 @@ class _ClientSession:
             b"",
         )
 
+    def _prepare_batch_agency(self, payload: bytes) -> None:
+        try:
+            first_bet = next(protocol.iter_bet_batch(payload))
+        except StopIteration as error:
+            raise ValueError("bet batch cannot be empty") from error
+
+        agency_id = first_bet.agency_id
+        if self._agency_id is not None and self._agency_id != agency_id:
+            raise ValueError("all bets in a connection must use one agency id")
+
+        if not self._round_agency_registered:
+            self._server._register_round_agency(self._round_state, agency_id)
+            self._round_agency_registered = True
+            self._agency_id = agency_id
+
     def _handle_client_end(self, payload: bytes) -> bool:
         end_agency_id = protocol.decode_agency_id(payload)
+
         if self._agency_id is not None and self._agency_id != end_agency_id:
             raise ValueError("end agency id must match batch agency id")
 
-        self._agency_id = end_agency_id
-        if not self._wait_for_quorum(end_agency_id):
+        if not self._round_agency_registered:
+            self._server._register_round_agency(self._round_state, end_agency_id)
+            self._round_agency_registered = True
+            self._agency_id = end_agency_id
+
+        if not self._server._wait_for_quorum(self._round_state, end_agency_id):
             return False
 
         self._send_winners()
         return True
 
     def _store_bet_batch(self, payload: bytes) -> tuple[int, int]:
-        with self._lottery_lock:
-            self._raise_if_shutdown()
+        with self._server._lottery_lock:
+            self._server._raise_if_shutdown()
             previous_storage_size = self._lottery_storage_size()
+
             try:
                 return self._store_bet_batch_locked(payload)
             except Exception:
@@ -329,24 +472,28 @@ class _ClientSession:
         remaining_bet_capacity = MAX_BETS_PER_SESSION - self._bet_amount
 
         for bet_payload in protocol.iter_bet_batch(payload):
-            self._raise_if_shutdown()
+            self._server._raise_if_shutdown()
+
             if bet_count == remaining_bet_capacity:
-                raise ValueError(
-                    f"session exceeds {MAX_BETS_PER_SESSION} bets"
-                )
+                raise ValueError(f"session exceeds {MAX_BETS_PER_SESSION} bets")
+
             batch_agency_id = self._resolve_batch_agency_id(
                 bet_payload.agency_id, batch_agency_id
             )
-
-            self._append_bet(bets, bet_payload)
+            bets.append(self._to_domain_bet(bet_payload))
             bet_count += 1
+
+            if len(bets) == BET_STORAGE_CHUNK_SIZE:
+                self._store_bets_locked(bets)
+                bets.clear()
 
         if bets:
             self._store_bets_locked(bets)
+
         if batch_agency_id is None:
             raise ValueError("bet batch cannot be empty")
 
-        self._raise_if_shutdown()
+        self._server._raise_if_shutdown()
         return batch_agency_id, bet_count
 
     def _resolve_batch_agency_id(
@@ -359,22 +506,12 @@ class _ClientSession:
 
         if self._agency_id is not None and agency_id != self._agency_id:
             raise ValueError("all bets in a connection must use one agency id")
+
         return batch_agency_id
 
-    def _append_bet(
-        self,
-        bets: list[Bet],
-        bet_payload: protocol.BetPayload,
-    ) -> None:
-        bets.append(self._to_domain_bet(bet_payload))
-        if len(bets) == BET_STORAGE_CHUNK_SIZE:
-            self._store_bets_locked(bets)
-            bets.clear()
-
     def _send_winners(self) -> None:
-        winners = self._load_winners()
-        for bet in winners:
-            self._raise_if_shutdown()
+        for bet in self._load_winners():
+            self._server._raise_if_shutdown()
             safe_socket.send_message(
                 self._client_socket,
                 protocol.MESSAGE_TYPE_WINNER,
@@ -382,7 +519,9 @@ class _ClientSession:
             )
 
         safe_socket.send_message(
-            self._client_socket, protocol.MESSAGE_TYPE_END, b""
+            self._client_socket,
+            protocol.MESSAGE_TYPE_END,
+            b"",
         )
 
     def _load_winners(self) -> list[Bet]:
@@ -391,22 +530,16 @@ class _ClientSession:
 
         winners = []
         try:
-            with self._lottery_lock:
-                stored_bets = iter(self._lottery.load_bets())
-                while True:
-                    self._raise_if_shutdown()
-                    try:
-                        bet = next(stored_bets)
-                    except StopIteration:
-                        break
-
-                    if (
-                        bet.agency_id == self._agency_id
-                        and self._lottery.has_won(bet)
+            with self._server._lottery_lock:
+                for bet in self._server._lottery.load_bets():
+                    self._server._raise_if_shutdown()
+                    if (bet.agency_id == self._agency_id
+                        and self._server._lottery.has_won(bet)
                     ):
                         winners.append(bet)
         except OSError as error:
             raise ClientStorageError("failed to load bets") from error
+
         return winners
 
     def _report_client_error(self, action: str, error: Exception) -> None:
@@ -432,13 +565,13 @@ class _ClientSession:
 
     def _store_bets_locked(self, bets: list[Bet]) -> None:
         try:
-            self._lottery.store_bets(bets)
+            self._server._lottery.store_bets(bets)
         except OSError as error:
             raise ClientStorageError("failed to store bets") from error
 
     def _lottery_storage_size(self) -> int:
         try:
-            return os.path.getsize(self._lottery.storage_path)
+            return os.path.getsize(self._server._lottery.storage_path)
         except FileNotFoundError:
             return 0
         except OSError as error:
@@ -446,7 +579,7 @@ class _ClientSession:
 
     def _rollback_bet_storage(self, storage_size: int) -> None:
         try:
-            os.truncate(self._lottery.storage_path, storage_size)
+            os.truncate(self._server._lottery.storage_path, storage_size)
         except FileNotFoundError as error:
             if storage_size == 0:
                 return
