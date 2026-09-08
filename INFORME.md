@@ -41,15 +41,14 @@ Cada apuesta se representa de la siguiente manera:
 
 | Campo | Representación | Tamaño |
 |---|---|---|
-| `agency_id` | Entero sin signo (`uint32`) | 4 bytes |
-| Longitud del nombre | Entero sin signo (`uint16`) | 2 bytes |
+| agency_id | Entero sin signo (uint32) | 4 bytes || Longitud del nombre | Entero sin signo (uint16) | 2 bytes |
 | Nombre | Texto codificado en UTF-8 | Cantidad de bytes indicada por su longitud |
-| Longitud del apellido | Entero sin signo (`uint16`) | 2 bytes |
+| Longitud del apellido | Entero sin signo (uint16) | 2 bytes |
 | Apellido | Texto codificado en UTF-8 | Cantidad de bytes indicada por su longitud |
-| `document` | Entero sin signo (`uint64`) | 8 bytes |
-| Longitud de la fecha de nacimiento | Entero sin signo (`uint16`) | 2 bytes |
+| document | Entero sin signo (uint64) | 8 bytes |
+| Longitud de la fecha de nacimiento | Entero sin signo (uint16) | 2 bytes |
 | Fecha de nacimiento | Texto codificado en UTF-8 | Cantidad de bytes indicada por su longitud |
-| `number` | Entero sin signo (`uint32`) | 4 bytes |
+| number | Entero sin signo (uint32) | 4 bytes |
 
 Todos los valores numéricos se codifican en orden de bytes big-endian. En el ejemplo, la apuesta ocupa 52 bytes, el payload completo del batch ocupa 60 bytes y el mensaje TLV, incluyendo su encabezado, ocupa 65 bytes. Esta información permite al servidor recorrer y decodificar el batch correctamente, independientemente de cómo TCP divida el flujo de bytes.
 
@@ -66,27 +65,39 @@ El servidor posee un thread principal, el cual funciona como receptor de conexio
 Se podría ver como: accept() --> crea worker --> vuelve a accept()
 
 Luego c/worker procesa la respectiva conexión por la que fue creado. Esto permite procesar varias agencias en simultáneo.
-El trabajo es aislado, ya que cada worker posee:
-- Socket
-- Su tempDir
-- su instancia de Lottery
-- Agency id propio
-- Sus apuestas
 
-El único estado compartido, que es relevante a la hora de hacer el quorum, es el set de agencias finalizadas.
-Este set está bueno para asegurarnos de no poner la misma agencia 2 veces.
+Cada worker posee:
+- Socket
+- Agency id propio
+- Cantidad de apuestas procesadas
+- Estado de su sesión
+
+A diferencia de la implementación anterior, las apuestas no se almacenan en un archivo distinto por conexión. El servidor posee una única instancia de Lottery y un único archivo bets.csv compartido entre los workers.
+
+Como varios workers pueden intentar acceder al archivo al mismo tiempo, se utiliza un threading.Lock para proteger las operaciones sobre Lottery. Este lock se utiliza tanto al almacenar apuestas como al cargar las apuestas para buscar ganadores.
+
+En el caso de load_bets(), como retorna un generator, el lock se mantiene durante toda la iteración del mismo. De esta forma no puede ocurrir que un worker esté leyendo las apuestas mientras otro worker escribe sobre el mismo archivo.
+
 Por otro lado, el mínimo requerido para aceptar el quorum es el valor configurable de AGENCY_QUORUM_MIN.
 
-Igualmente este set (_completed_agencies) se protege con threading.Condition, el cual lo posee internamente _quorum_condition. Entonces cuando se envía un mensaje END, lo que ocurre es lo siguiente:
+El servidor trabaja con rondas. Cada ronda puede admitir como máximo AGENCY_QUORUM_MIN agencias. Si llegan más conexiones cuando la ronda actual ya tiene todos sus workers admitidos, esos nuevos workers esperan hasta que termine la ronda y se habilite una nueva.
+
+Cada ronda mantiene el conjunto de agencias participantes y el conjunto de agencias que ya finalizaron el envío de apuestas. De esta manera el quorum se calcula únicamente teniendo en cuenta las agencias de la ronda actual.
+
+Este estado se protege con threading.Condition, el cual lo posee internamente _quorum_condition. Entonces cuando se envía un mensaje END, lo que ocurre es lo siguiente:
 
 1. Worker toma el lock de _quorum_condition
-2. Agrega la agencia al set
+2. Agrega la agencia al set de agencias finalizadas de la ronda
 3. Comprueba si se alcanzó quorum
 4. Si falta, queda bloqueado con wait_for()
 5. Si se alcanzó, ejecuta notify_all()
-6. Todos los workers despiertan y envían los ganadores
+6. Todos los workers de esa ronda despiertan y envían los ganadores
 
-Este wait_for() espera de manera bloqueante, evitando el busy waiting. 
+Este wait_for() espera de manera bloqueante, evitando el busy waiting.
+
+Cuando todos los workers de una ronda terminan, se limpia el archivo bets.csv y se habilita una nueva ronda. De esta manera las apuestas de rondas anteriores no interfieren con las siguientes, incluso si una misma agency id vuelve a participar.
+
+Si un worker falla antes de completar correctamente la ronda, la ronda se marca como abortada y se despierta al resto de los workers para evitar que queden esperando indefinidamente un quorum que ya no puede alcanzarse.
 
 # Terminación graceful ante SIGTERM
 
@@ -101,12 +112,12 @@ El flujo para el servidor es el siguiente:
 4. Ya no se bloquea accept()
 5. Se cierran sockets activos
 6. Recv/send se desbloquean
-7. Notify_all() despierta workers que pudieran quedar esperando quorum
+7. Notify_all() despierta workers que pudieran quedar esperando quorum o esperando una nueva ronda
 8. Workers limpian recursos y retornan
 9. Thread principal hace join()
 10. Finaliza el servidor con codigo 0
 
-El handler no ejecuta los join directamente, request_shutdown() solamente marca la cancelación y cierra el listener. La limpieza completa pasa en el finally del run(), acto seguido los sockets y tempdirs se cierran mediante context managers.
+El handler no ejecuta los join directamente, request_shutdown() solamente marca la cancelación y cierra el listener. La limpieza completa pasa en el finally del run(), acto seguido los sockets se cierran y los workers finalizan sus sesiones.
 
 Por otro lado, el shutdown del cliente ejecuta el siguiente flujo:
 
@@ -118,19 +129,19 @@ Por otro lado, el shutdown del cliente ejecuta el siguiente flujo:
 6. elimina output temporal
 7. Exit con codigo 0
 
-El cliente escribe en un archivo temporal y solo lo renombra cuando se completa el protocolo. Si antes de que pase eso llega el SIGTERM, se cierra y elimina el temporal. 
+El cliente escribe en un archivo temporal y solo lo renombra cuando se completa el protocolo. Si antes de que pase eso llega el SIGTERM, se cierra y elimina el temporal.  
 
 # Justificación de librerias más importantes elegidas
 
 ## Librerias del servidor
 
-- Threading: Las operaciones de I/O bound hacen que el uso de esta libreria sea muy beneficioso. El trabajo se basa en esperar conexiones (thread principal), recibir y enviar data por sockets (los threads no-daemon). El GIL es el global interpreter lock, de esta forma CPython procesa en un mismo proceso un solo thread que ejecute bytecode python al mismo tiempo. Si bien es un tecnicismo que parece que es una pésima idea para threads, en el caso del tp0, no es grave. 
+- Threading: Las operaciones de I/O bound hacen que el uso de esta libreria sea muy beneficioso. El trabajo se basa en esperar conexiones (thread principal), recibir y enviar data por sockets (los threads no-daemon). El GIL es el global interpreter lock, de esta forma CPython procesa en un mismo proceso un solo thread que ejecute bytecode python al mismo tiempo. Si bien es un tecnicismo que parece que es una pésima idea para threads, en el caso del tp0, no es grave.  
 Para operaciones CPU bound, el GIL impide procesamiento paralelo y ahí si se nota más el problema. Calculos pesados no van a poder ejecutarse en paralelo sobre un cpu > 1 núcleo, porque un solo proceso va a generar que no se aprovechen ambos nucleos y que todo se ejecute concurrentemente cuando podria ser paralelo.
 
-Para nuestro caso, muchas veces los threads se encuentran bloqueados esperando: accept(), recv(), send(), leer archivos y el condition.wait_for(). En esos momentos, el thread esta en estado SLEEPING y no consume cpu, por lo que no es significativo el bloqueo del paralelismo en single-process. 
+Para nuestro caso, muchas veces los threads se encuentran bloqueados esperando: accept(), recv(), send(), leer archivos y el condition.wait_for(). En esos momentos, el thread esta en estado SLEEPING y no consume cpu, por lo que no es significativo el bloqueo del paralelismo en single-process.  
 Así es como el GIL se libera durante operaciones I/O.
 
-- tempfile: Aquí se usa TemporaryDirectory otorga almacenamiento aislado por conexión. También permite que al finalizar la sesión, incluso ante errores o shutdown, se puedan desechar los archivos temporales.
+Dentro de threading se utilizan Lock para proteger el acceso al Lottery y bets.csv, Condition para coordinar el quorum y las rondas, y Event para indicar el estado de shutdown del servidor.
 
 ## Librerias del cliente
 
@@ -143,7 +154,3 @@ La estructura, los campos y las longitudes del protocolo se implementaron manual
 
 - encoding/csv: se utiliza para escribir el archivo csv de ganadores. No
 participa en la serialización del protocolo de red.
-
-
-
-
