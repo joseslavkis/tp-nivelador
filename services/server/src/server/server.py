@@ -1,6 +1,5 @@
 import os
 import socket
-import tempfile
 import threading
 from collections.abc import Callable
 
@@ -48,11 +47,14 @@ class Server:
         self._client_sockets: set[socket.socket] = set()
         self._client_threads: set[threading.Thread] = set()
         os.makedirs(storage_directory, exist_ok=True)
+        self._lottery = Lottery(os.path.join(storage_directory, "bets.csv"))
+        self._lottery_lock = threading.Lock()
 
     def _handle_client(self, client_socket: socket.socket) -> None:
         session = _ClientSession(
             client_socket=client_socket,
-            storage_directory=self.storage_directory,
+            lottery=self._lottery,
+            lottery_lock=self._lottery_lock,
             wait_for_quorum=self._wait_for_quorum,
             raise_if_shutdown=self._raise_if_shutdown,
         )
@@ -242,12 +244,14 @@ class _ClientSession:
     def __init__(
         self,
         client_socket: socket.socket,
-        storage_directory: str,
+        lottery: Lottery,
+        lottery_lock: threading.Lock,
         wait_for_quorum: Callable[[int], bool],
         raise_if_shutdown: Callable[[], None],
     ) -> None:
         self._client_socket = client_socket
-        self._storage_directory = storage_directory
+        self._lottery = lottery
+        self._lottery_lock = lottery_lock
         self._wait_for_quorum = wait_for_quorum
         self._raise_if_shutdown = raise_if_shutdown
         self._agency_id: int | None = None
@@ -255,44 +259,39 @@ class _ClientSession:
 
     def handle(self) -> None:
         action = "handle-client"
-        with tempfile.TemporaryDirectory(
-            prefix="lottery-session-", dir=self._storage_directory
-        ) as session_directory:
-            lottery = Lottery(os.path.join(session_directory, "bets.csv"))
+        try:
+            logger.info(action, logger.LogResult.in_progress)
+            session_completed = self._receive_client_messages()
+            if not session_completed:
+                return
+            logger.info(
+                action,
+                logger.LogResult.success,
+                "bets-amount",
+                self._bet_amount,
+            )
+        except ValueError as error:
+            self._report_client_error(action, error)
+            raise ClientProtocolError(str(error)) from error
+        except ClientStorageError as error:
+            self._report_client_error(action, error)
+            raise
 
-            try:
-                logger.info(action, logger.LogResult.in_progress)
-                session_completed = self._receive_client_messages(lottery)
-                if not session_completed:
-                    return
-                logger.info(
-                    action,
-                    logger.LogResult.success,
-                    "bets-amount",
-                    self._bet_amount,
-                )
-            except ValueError as error:
-                self._report_client_error(action, error)
-                raise ClientProtocolError(str(error)) from error
-            except ClientStorageError as error:
-                self._report_client_error(action, error)
-                raise
-
-    def _receive_client_messages(self, lottery: Lottery) -> bool:
+    def _receive_client_messages(self) -> bool:
         while True:
             self._raise_if_shutdown()
             message_type, payload = safe_socket.recv_message(self._client_socket)
 
             if message_type == protocol.MESSAGE_TYPE_BETS_BATCH:
-                self._handle_bets_batch(lottery, payload)
+                self._handle_bets_batch(payload)
                 continue
             if message_type == protocol.MESSAGE_TYPE_END:
-                return self._handle_client_end(lottery, payload)
+                return self._handle_client_end(payload)
 
             raise ValueError(f"unexpected client message type: {message_type}")
 
-    def _handle_bets_batch(self, lottery: Lottery, payload: bytes) -> None:
-        batch_agency_id, batch_size = self._store_bet_batch(lottery, payload)
+    def _handle_bets_batch(self, payload: bytes) -> None:
+        batch_agency_id, batch_size = self._store_bet_batch(payload)
         self._agency_id = batch_agency_id
         self._bet_amount += batch_size
         safe_socket.send_message(
@@ -301,7 +300,7 @@ class _ClientSession:
             b"",
         )
 
-    def _handle_client_end(self, lottery: Lottery, payload: bytes) -> bool:
+    def _handle_client_end(self, payload: bytes) -> bool:
         end_agency_id = protocol.decode_agency_id(payload)
         if self._agency_id is not None and self._agency_id != end_agency_id:
             raise ValueError("end agency id must match batch agency id")
@@ -310,12 +309,20 @@ class _ClientSession:
         if not self._wait_for_quorum(end_agency_id):
             return False
 
-        self._send_winners(lottery)
+        self._send_winners()
         return True
 
-    def _store_bet_batch(
-        self, lottery: Lottery, payload: bytes
-    ) -> tuple[int, int]:
+    def _store_bet_batch(self, payload: bytes) -> tuple[int, int]:
+        with self._lottery_lock:
+            self._raise_if_shutdown()
+            previous_storage_size = self._lottery_storage_size()
+            try:
+                return self._store_bet_batch_locked(payload)
+            except Exception:
+                self._rollback_bet_storage(previous_storage_size)
+                raise
+
+    def _store_bet_batch_locked(self, payload: bytes) -> tuple[int, int]:
         bets: list[Bet] = []
         batch_agency_id: int | None = None
         bet_count = 0
@@ -331,14 +338,15 @@ class _ClientSession:
                 bet_payload.agency_id, batch_agency_id
             )
 
-            self._append_bet(lottery, bets, bet_payload)
+            self._append_bet(bets, bet_payload)
             bet_count += 1
 
         if bets:
-            self._store_bets(lottery, bets)
+            self._store_bets_locked(bets)
         if batch_agency_id is None:
             raise ValueError("bet batch cannot be empty")
 
+        self._raise_if_shutdown()
         return batch_agency_id, bet_count
 
     def _resolve_batch_agency_id(
@@ -355,37 +363,51 @@ class _ClientSession:
 
     def _append_bet(
         self,
-        lottery: Lottery,
         bets: list[Bet],
         bet_payload: protocol.BetPayload,
     ) -> None:
         bets.append(self._to_domain_bet(bet_payload))
         if len(bets) == BET_STORAGE_CHUNK_SIZE:
-            self._store_bets(lottery, bets)
+            self._store_bets_locked(bets)
             bets.clear()
 
-    def _send_winners(self, lottery: Lottery) -> None:
-        if self._bet_amount > 0:
-            stored_bets = iter(lottery.load_bets())
-            while True:
-                self._raise_if_shutdown()
-                try:
-                    bet = next(stored_bets)
-                except StopIteration:
-                    break
-                except OSError as error:
-                    raise ClientStorageError("failed to load bets") from error
-
-                if lottery.has_won(bet):
-                    safe_socket.send_message(
-                        self._client_socket,
-                        protocol.MESSAGE_TYPE_WINNER,
-                        protocol.encode_bet(self._to_bet_payload(bet)),
-                    )
+    def _send_winners(self) -> None:
+        winners = self._load_winners()
+        for bet in winners:
+            self._raise_if_shutdown()
+            safe_socket.send_message(
+                self._client_socket,
+                protocol.MESSAGE_TYPE_WINNER,
+                protocol.encode_bet(self._to_bet_payload(bet)),
+            )
 
         safe_socket.send_message(
             self._client_socket, protocol.MESSAGE_TYPE_END, b""
         )
+
+    def _load_winners(self) -> list[Bet]:
+        if self._bet_amount == 0:
+            return []
+
+        winners = []
+        try:
+            with self._lottery_lock:
+                stored_bets = iter(self._lottery.load_bets())
+                while True:
+                    self._raise_if_shutdown()
+                    try:
+                        bet = next(stored_bets)
+                    except StopIteration:
+                        break
+
+                    if (
+                        bet.agency_id == self._agency_id
+                        and self._lottery.has_won(bet)
+                    ):
+                        winners.append(bet)
+        except OSError as error:
+            raise ClientStorageError("failed to load bets") from error
+        return winners
 
     def _report_client_error(self, action: str, error: Exception) -> None:
         self._send_protocol_error(error)
@@ -408,12 +430,29 @@ class _ClientSession:
         except OSError:
             pass
 
-    @staticmethod
-    def _store_bets(lottery: Lottery, bets: list[Bet]) -> None:
+    def _store_bets_locked(self, bets: list[Bet]) -> None:
         try:
-            lottery.store_bets(bets)
+            self._lottery.store_bets(bets)
         except OSError as error:
             raise ClientStorageError("failed to store bets") from error
+
+    def _lottery_storage_size(self) -> int:
+        try:
+            return os.path.getsize(self._lottery.storage_path)
+        except FileNotFoundError:
+            return 0
+        except OSError as error:
+            raise ClientStorageError("failed to inspect bet storage") from error
+
+    def _rollback_bet_storage(self, storage_size: int) -> None:
+        try:
+            os.truncate(self._lottery.storage_path, storage_size)
+        except FileNotFoundError as error:
+            if storage_size == 0:
+                return
+            raise ClientStorageError("failed to rollback bets") from error
+        except OSError as error:
+            raise ClientStorageError("failed to rollback bets") from error
 
     @staticmethod
     def _to_domain_bet(bet: protocol.BetPayload) -> Bet:
