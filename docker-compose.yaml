@@ -95,3 +95,20 @@ services:
     volumes:
       - ./input:/input
       - ./output:/output
+
+  client_5:
+    build:
+      context: ./services/client
+      dockerfile: Dockerfile
+    container_name: client_5
+    depends_on:
+      - server
+    environment:
+      - AGENCY_ID=0
+      - SERVER_HOST=server
+      - SERVER_PORT=5678
+      - INPUT_FILE=/input/input-5.csv
+      - OUTPUT_FILE=/output/output-5.csv
+    volumes:
+      - ./input:/input
+      - ./output:/output    
