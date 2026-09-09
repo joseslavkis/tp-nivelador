@@ -17,7 +17,7 @@ import (
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
 )
 
-const maxConnectionAttempts = 10
+const maxConnectionAttempts = 50
 const connectionAttemptDelay = 200 * time.Millisecond
 
 const connectToServerAction = "connect-to-server"
