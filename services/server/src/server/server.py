@@ -8,7 +8,6 @@ import protocol
 import safe_socket
 from lottery import Bet, Lottery
 
-MAX_BETS_PER_SESSION = 1_000_000
 BET_STORAGE_CHUNK_SIZE = 1024
 
 
@@ -469,13 +468,9 @@ class _ClientSession:
         bets: list[Bet] = []
         batch_agency_id: int | None = None
         bet_count = 0
-        remaining_bet_capacity = MAX_BETS_PER_SESSION - self._bet_amount
 
         for bet_payload in protocol.iter_bet_batch(payload):
             self._server._raise_if_shutdown()
-
-            if bet_count == remaining_bet_capacity:
-                raise ValueError(f"session exceeds {MAX_BETS_PER_SESSION} bets")
 
             batch_agency_id = self._resolve_batch_agency_id(
                 bet_payload.agency_id, batch_agency_id

@@ -41,7 +41,8 @@ Cada apuesta se representa de la siguiente manera:
 
 | Campo | Representación | Tamaño |
 |---|---|---|
-| agency_id | Entero sin signo (uint32) | 4 bytes || Longitud del nombre | Entero sin signo (uint16) | 2 bytes |
+| agency_id | Entero sin signo (uint32) | 4 bytes |
+| Longitud del nombre | Entero sin signo (uint16) | 2 bytes |
 | Nombre | Texto codificado en UTF-8 | Cantidad de bytes indicada por su longitud |
 | Longitud del apellido | Entero sin signo (uint16) | 2 bytes |
 | Apellido | Texto codificado en UTF-8 | Cantidad de bytes indicada por su longitud |

@@ -1,5 +1,4 @@
 import socket
-from weakref import WeakKeyDictionary
 
 MESSAGE_TYPE_SIZE = 1
 PAYLOAD_LENGTH_SIZE = 4
@@ -9,29 +8,21 @@ MAX_MESSAGE_TYPE = 255
 MAX_PAYLOAD_SIZE = 16 * 1024 * 1024
 MAX_EMPTY_OPERATIONS = 100
 
-_RECEIVE_BUFFERS: WeakKeyDictionary[socket.socket, bytearray] = WeakKeyDictionary()
-
-
 def recv_all(sock: socket.socket, size: int) -> bytes:
     if size < 0:
         raise ValueError(f"receive size must be non-negative: {size}")
     if size == 0:
         return b""
 
-    received = _RECEIVE_BUFFERS.pop(sock, bytearray())
+    received = bytearray()
 
     while len(received) < size:
-        chunk = sock.recv(size)
+        chunk = sock.recv(size - len(received))
         if not chunk:
             raise ConnectionError("connection closed while receiving data")
         received.extend(chunk)
 
-    result = bytes(received[:size])
-    del received[:size]
-    if received:
-        _RECEIVE_BUFFERS[sock] = received
-
-    return result
+    return bytes(received)
 
 
 def send_all(sock: socket.socket, data: bytes) -> None:
