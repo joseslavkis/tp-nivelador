@@ -26,7 +26,7 @@ Mensaje legacy que se decidió mantener a modo de mostrar los mensajes que se us
 - BETS_BATCH
 Batch de apuestas enviado por las agencias, su objetivo es optimizar la cantidad de mensajes enviados por el socket
 - BATCH_ACK
-Al ser un batch de apuestas, es fundamental sincronizar la recepción de la información. Por ese motivo al recibir el conjunto de apuestas, el server envia un mensaje del tipo BATCH_ACK a la agencia emisora. Si bien la conexión TCP ya garantiza entrega ordenada mientras la conexión sea válida, ir mandando ACK's por cada batch procesado, proporciona un comportamiento mas armónico en el procesamiento y el posterior envio de más información de parte del cliente.
+Al ser un batch de apuestas, se utiliza BATCH_ACK como mecanismo de control de flujo a nivel de aplicación. El servidor envía este mensaje únicamente después de validar y almacenar correctamente el batch recibido. El cliente espera esta confirmación antes de enviar el siguiente batch. Si bien TCP garantiza entrega ordenada mientras la conexión permanezca válida, no indica por sí mismo que el servidor ya haya procesado la información recibida.
 - ERROR
 Ocurrió un error en el envio de información
 
